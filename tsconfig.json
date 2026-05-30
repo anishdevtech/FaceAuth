@@ -2,7 +2,11 @@
   "extends": "@react-native/typescript-config",
   "compilerOptions": {
     "types": ["jest"],
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "jsx": "react-native",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true
   },
   "include": ["**/*.ts", "**/*.tsx"],
   "exclude": ["**/node_modules", "**/Pods"]
