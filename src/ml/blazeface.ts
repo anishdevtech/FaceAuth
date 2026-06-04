@@ -1,17 +1,7 @@
-/**
- * BlazeFace — Anchor generation and output decoding.
- *
- * Model spec (short-range):
- *   Input  : float32[1, 128, 128, 3]  — values in [0, 1]
- *   Output0: float32[1, 896, 16]      — regressors  (dx, dy, dw, dh, 6 × landmarks)
- *   Output1: float32[1, 896,  1]      — classificators (raw logits, NOT probabilities)
- *
- * Reference: https://arxiv.org/abs/1907.05047
- */
+// Handles the generation of anchor boxes and the decoding of model outputs for BlazeFace.
+// Transforms raw tensor regressions into bounded face coordinate boxes and extracts 6-point facial landmarks.
 
 import { sigmoid, clamp } from '../utils/mathUtils';
-
-// ─── Constants ────────────────────────────────────────────────────────────────
 
 const INPUT_SIZE   = 128;
 const NUM_ANCHORS  = 896;
@@ -25,8 +15,6 @@ const IOU_THRESHOLD   = 0.3;
 const STRIDES:            readonly number[] = [8, 16] as const;
 const ANCHORS_PER_STRIDE: readonly number[] = [2,  6] as const;
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
 export interface Anchor {
   cx: number;  // normalised [0, 1]
   cy: number;  // normalised [0, 1]
@@ -38,9 +26,8 @@ export interface FaceBox {
   xmax:       number;
   ymax:       number;
   confidence: number;  // sigmoid probability [0, 1]
+  landmarks?: Float32Array;  // 6 keypoints × 2 coords = 12 values
 }
-
-// ─── Anchor generation ────────────────────────────────────────────────────────
 
 /**
  * Generates the 896 prior anchor boxes for the 128×128 BlazeFace input grid.
@@ -80,7 +67,7 @@ export function generateAnchors(): Anchor[] {
 /** 896 pre-computed anchors, shared across hooks and worklets. */
 export const BLAZEFACE_ANCHORS: readonly Anchor[] = Object.freeze(generateAnchors());
 
-// ─── IoU ──────────────────────────────────────────────────────────────────────
+// Computes the Intersection over Union (IoU) of two given bounding boxes.
 
 function iou(a: FaceBox, b: FaceBox): number {
   'worklet';
@@ -100,7 +87,7 @@ function iou(a: FaceBox, b: FaceBox): number {
   return union > 0 ? inter / union : 0;
 }
 
-// ─── Non-Maximum Suppression ──────────────────────────────────────────────────
+// Applies confidence-weighted Non-Maximum Suppression to eliminate overlapping bounding boxes.
 
 /**
  * Confidence-weighted blending NMS, matching the BlazeFace reference
@@ -126,12 +113,24 @@ export function nms(boxes: FaceBox[]): FaceBox[] {
     }
 
     let totalWeight = 0, ymin = 0, xmin = 0, ymax = 0, xmax = 0;
+    const landmarks = new Float32Array(12);
+
     for (const box of cluster) {
       totalWeight += box.confidence;
       ymin += box.ymin * box.confidence;
       xmin += box.xmin * box.confidence;
       ymax += box.ymax * box.confidence;
       xmax += box.xmax * box.confidence;
+      
+      if (box.landmarks) {
+        for (let k = 0; k < 12; k++) {
+          landmarks[k] += box.landmarks[k] * box.confidence;
+        }
+      }
+    }
+
+    for (let k = 0; k < 12; k++) {
+      landmarks[k] /= totalWeight;
     }
 
     keep.push({
@@ -140,6 +139,7 @@ export function nms(boxes: FaceBox[]): FaceBox[] {
       ymax: ymax / totalWeight,
       xmax: xmax / totalWeight,
       confidence: sorted[i].confidence,
+      landmarks: landmarks,
     });
   }
 
@@ -185,6 +185,12 @@ export function decodeFaces(
     const cy = a.cy + regressors[base + 1] / INPUT_SIZE;
     const w  =        regressors[base + 2] / INPUT_SIZE;
     const h  =        regressors[base + 3] / INPUT_SIZE;
+    
+    const landmarks = new Float32Array(12);
+    for (let k = 0; k < 6; k++) {
+      landmarks[k * 2]     = a.cx + regressors[base + 4 + k * 2] / INPUT_SIZE;
+      landmarks[k * 2 + 1] = a.cy + regressors[base + 5 + k * 2] / INPUT_SIZE;
+    }
 
     candidates.push({
       xmin:       clamp(cx - w / 2, 0, 1),
@@ -192,6 +198,7 @@ export function decodeFaces(
       xmax:       clamp(cx + w / 2, 0, 1),
       ymax:       clamp(cy + h / 2, 0, 1),
       confidence: prob,
+      landmarks:  landmarks,
     });
   }
 

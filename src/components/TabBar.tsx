@@ -1,6 +1,5 @@
-/**
- * TabBar — Custom bottom tab navigation bar (no react-navigation needed)
- */
+// Custom bottom tab navigation component.
+// Implements a lightweight, state-driven tab bar without relying on heavy third-party navigation libraries.
 import React from 'react';
 import { StyleSheet, Text, TouchableOpacity, View, Platform } from 'react-native';
 

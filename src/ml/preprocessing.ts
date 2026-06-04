@@ -1,17 +1,8 @@
-/**
- * Frame preprocessing — worklet-safe pixel buffer transforms.
- *
- * All functions run on the VisionCamera frame-processor thread.
- *
- * Supported pixel formats (VisionCamera v4):
- *   'rgb'  — 3 bytes/px: R G B
- *   'bgra' — 4 bytes/px: B G R A  (default on Android)
- *   'rgba' — 4 bytes/px: R G B A
- */
+// Provides frame preprocessing utilities optimized for execution on the VisionCamera frame-processor thread (worklets).
+// Responsible for parsing pixel layouts, resizing buffers, and cropping face regions for machine learning models.
+// Supported pixel formats include RGB, BGRA, and RGBA.
 
 import { clamp } from '../utils/mathUtils';
-
-// ─── Pixel layout ─────────────────────────────────────────────────────────────
 
 interface PixelLayout {
   bytesPerPixel: number;
@@ -39,11 +30,9 @@ function resolvePixelLayout(pixelFormat: string): PixelLayout {
     return { bytesPerPixel: 3, rOffset: 0, gOffset: 1, bOffset: 2 };
   }
 
-  // Unknown format — assume BGRA (most common Android default)
+  // Default fallback for unknown formats is BGRA, the standard Android default.
   return { bytesPerPixel: 4, rOffset: 2, gOffset: 1, bOffset: 0 };
 }
-
-// ─── Buffer helpers ───────────────────────────────────────────────────────────
 
 /**
  * Converts a TypedArray to a properly-sliced ArrayBuffer for
@@ -52,10 +41,8 @@ function resolvePixelLayout(pixelFormat: string): PixelLayout {
  */
 export function typedArrayToBuffer(arr: Float32Array | Uint8Array): ArrayBuffer {
   'worklet';
-  return (arr.buffer as ArrayBuffer).slice(arr.byteOffset, arr.byteOffset + arr.byteLength);
+  return arr.buffer as ArrayBuffer;
 }
-
-// ─── Resize ───────────────────────────────────────────────────────────────────
 
 /**
  * Nearest-neighbour resize of a flat pixel buffer to `dstW × dstH`.
@@ -83,30 +70,39 @@ export function resizeToFloat32(
   dstH:        number,
   bytesPerRow: number,
   pixelFormat: string,
+  outBuffer:   Float32Array,
 ): Float32Array {
   'worklet';
   const { bytesPerPixel, rOffset, gOffset, bOffset } = resolvePixelLayout(pixelFormat);
-  const output = new Float32Array(dstW * dstH * 3);
+  
+  // Cache LUT for the inner loop since dstW and srcW are constant per model
+  const globalObj = globalThis as any;
+  if (globalObj._lut_srcW !== srcW || globalObj._lut_dstW !== dstW || !globalObj._lutX) {
+    globalObj._lut_srcW = srcW;
+    globalObj._lut_dstW = dstW;
+    const lut = new Float32Array(dstW);
+    for (let x = 0; x < dstW; x++) lut[x] = clamp(Math.floor((x + 0.5) * srcW / dstW), 0, srcW - 1);
+    globalObj._lutX = lut;
+  }
+  const lutX: Float32Array = globalObj._lutX;
 
   for (let y = 0; y < dstH; y++) {
     const srcY       = clamp(Math.floor((y + 0.5) * srcH / dstH), 0, srcH - 1);
     const srcRowBase = srcY * bytesPerRow;
+    const dstRowBase = y * dstW * 3;
 
     for (let x = 0; x < dstW; x++) {
-      const srcX   = clamp(Math.floor((x + 0.5) * srcW / dstW), 0, srcW - 1);
-      const srcIdx = srcRowBase + srcX * bytesPerPixel;
-      const dstIdx = (y * dstW + x) * 3;
+      const srcIdx = srcRowBase + lutX[x] * bytesPerPixel;
+      const dstIdx = dstRowBase + x * 3;
 
-      output[dstIdx    ] = pixels[srcIdx + rOffset] / 255;
-      output[dstIdx + 1] = pixels[srcIdx + gOffset] / 255;
-      output[dstIdx + 2] = pixels[srcIdx + bOffset] / 255;
+      outBuffer[dstIdx    ] = pixels[srcIdx + rOffset] / 255;
+      outBuffer[dstIdx + 1] = pixels[srcIdx + gOffset] / 255;
+      outBuffer[dstIdx + 2] = pixels[srcIdx + bOffset] / 255;
     }
   }
 
-  return output;
+  return outBuffer;
 }
-
-// ─── Face crop ────────────────────────────────────────────────────────────────
 
 /**
  * Crops a padded face region from the full frame and resizes it to
@@ -139,6 +135,7 @@ export function cropAndResizeFace(
   dstH:        number,
   bytesPerRow: number,
   pixelFormat: string,
+  outBuffer:   Float32Array,
   padFactor    = 0.2,
 ): Float32Array {
   'worklet';
@@ -156,26 +153,133 @@ export function cropAndResizeFace(
   const cropH = y2 - y1;
 
   // Guard against degenerate crops at frame edges
-  if (cropW <= 0 || cropH <= 0) return new Float32Array(dstW * dstH * 3);
+  if (cropW <= 0 || cropH <= 0) {
+    outBuffer.fill(0);
+    return outBuffer;
+  }
 
-  const output = new Float32Array(dstW * dstH * 3);
+  // Precompute X multipliers to hoist math out of inner loop
+  const globalObj = globalThis as any;
+  if (globalObj._crop_dstW !== dstW || !globalObj._crop_lutX) {
+    globalObj._crop_dstW = dstW;
+    const lut = new Float32Array(dstW);
+    for (let x = 0; x < dstW; x++) lut[x] = (x + 0.5) / dstW;
+    globalObj._crop_lutX = lut;
+  }
+  const lutX: Float32Array = globalObj._crop_lutX;
+  const baseX = x1 * srcW;
+  const scaleX = cropW * srcW;
 
   for (let y = 0; y < dstH; y++) {
     const normY      = y1 + ((y + 0.5) / dstH) * cropH;
     const srcY       = clamp(Math.floor(normY * srcH), 0, srcH - 1);
     const srcRowBase = srcY * bytesPerRow;
+    const dstRowBase = y * dstW * 3;
 
     for (let x = 0; x < dstW; x++) {
-      const normX  = x1 + ((x + 0.5) / dstW) * cropW;
-      const srcX   = clamp(Math.floor(normX * srcW), 0, srcW - 1);
+      const srcX   = clamp(Math.floor(baseX + lutX[x] * scaleX), 0, srcW - 1);
       const srcIdx = srcRowBase + srcX * bytesPerPixel;
-      const dstIdx = (y * dstW + x) * 3;
+      const dstIdx = dstRowBase + x * 3;
 
-      output[dstIdx    ] = (pixels[srcIdx + rOffset] - 127.5) / 127.5;
-      output[dstIdx + 1] = (pixels[srcIdx + gOffset] - 127.5) / 127.5;
-      output[dstIdx + 2] = (pixels[srcIdx + bOffset] - 127.5) / 127.5;
+      outBuffer[dstIdx    ] = (pixels[srcIdx + rOffset] - 127.5) / 127.5;
+      outBuffer[dstIdx + 1] = (pixels[srcIdx + gOffset] - 127.5) / 127.5;
+      outBuffer[dstIdx + 2] = (pixels[srcIdx + bOffset] - 127.5) / 127.5;
     }
   }
 
-  return output;
+  return outBuffer;
+}
+
+/**
+ * Crops a padded face region from the full frame and resizes it into a
+ * Uint8Array with packed RGB (3 bpp) layout — the format expected by
+ * `applyCLAHE()`.
+ *
+ * This is deliberately separate from `cropAndResizeFace` so the existing
+ * float32 path remains untouched for callers that don't need CLAHE.
+ */
+export function cropFaceToUint8(
+  pixels:      Uint8Array,
+  srcW:        number,
+  srcH:        number,
+  box: {
+    ymin: number;
+    xmin: number;
+    ymax: number;
+    xmax: number;
+  },
+  dstW:        number,
+  dstH:        number,
+  bytesPerRow: number,
+  pixelFormat: string,
+  outBuffer:   Uint8Array,
+  padFactor    = 0.2,
+): Uint8Array {
+  'worklet';
+  const { bytesPerPixel, rOffset, gOffset, bOffset } = resolvePixelLayout(pixelFormat);
+
+  const padX = (box.xmax - box.xmin) * padFactor;
+  const padY = (box.ymax - box.ymin) * padFactor;
+
+  const x1 = clamp(box.xmin - padX, 0, 1);
+  const y1 = clamp(box.ymin - padY, 0, 1);
+  const x2 = clamp(box.xmax + padX, 0, 1);
+  const y2 = clamp(box.ymax + padY, 0, 1);
+
+  const cropW = x2 - x1;
+  const cropH = y2 - y1;
+
+  if (cropW <= 0 || cropH <= 0) {
+    outBuffer.fill(0);
+    return outBuffer;
+  }
+
+  const globalObj = globalThis as any;
+  if (globalObj._crop_u8_dstW !== dstW || !globalObj._crop_u8_lutX) {
+    globalObj._crop_u8_dstW = dstW;
+    const lut = new Float32Array(dstW);
+    for (let x = 0; x < dstW; x++) lut[x] = (x + 0.5) / dstW;
+    globalObj._crop_u8_lutX = lut;
+  }
+  const lutX: Float32Array = globalObj._crop_u8_lutX;
+  const baseX  = x1 * srcW;
+  const scaleX = cropW * srcW;
+
+  for (let y = 0; y < dstH; y++) {
+    const normY      = y1 + ((y + 0.5) / dstH) * cropH;
+    const srcY       = clamp(Math.floor(normY * srcH), 0, srcH - 1);
+    const srcRowBase = srcY * bytesPerRow;
+    const dstRowBase = y * dstW * 3;  // always RGB = 3 bpp
+
+    for (let x = 0; x < dstW; x++) {
+      const srcX   = clamp(Math.floor(baseX + lutX[x] * scaleX), 0, srcW - 1);
+      const srcIdx = srcRowBase + srcX * bytesPerPixel;
+      const dstIdx = dstRowBase + x * 3;
+
+      outBuffer[dstIdx    ] = pixels[srcIdx + rOffset];
+      outBuffer[dstIdx + 1] = pixels[srcIdx + gOffset];
+      outBuffer[dstIdx + 2] = pixels[srcIdx + bOffset];
+    }
+  }
+
+  return outBuffer;
+}
+
+/**
+ * Converts a Uint8Array RGB buffer (e.g. CLAHE output) into a Float32Array
+ * normalised to [−1, 1] for MobileFaceNet input.
+ *
+ * @param src   Uint8Array of packed RGB pixels (3 bpp, no alpha).
+ * @param out   Pre-allocated Float32Array of the same pixel count × 3.
+ */
+export function uint8ToFloat32Normalized(
+  src: Uint8Array,
+  out: Float32Array,
+): Float32Array {
+  'worklet';
+  const len = src.length;  // width * height * 3
+  for (let i = 0; i < len; i++) {
+    out[i] = (src[i] - 127.5) / 127.5;
+  }
+  return out;
 }

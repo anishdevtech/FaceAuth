@@ -1,11 +1,8 @@
-/**
- * Math utilities — pure JS, worklet-safe.
- *
- * All functions marked `'worklet'` run on the VisionCamera frame-processor
- * thread without bridging to the JS thread.
- */
+// Provides mathematical operations optimized for execution on the VisionCamera frame-processor thread.
+// All functions are decorated with the 'worklet' directive to guarantee isolated execution
+// on the UI thread without synchronous bridging to the JavaScript runtime.
 
-// ─── Activation helpers ───────────────────────────────────────────────────────
+
 
 /** Maps an unbounded logit to a probability in [0, 1]. */
 export function sigmoid(x: number): number {
@@ -19,7 +16,7 @@ export function clamp(x: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, x));
 }
 
-// ─── Vector operations ────────────────────────────────────────────────────────
+
 
 /**
  * Returns a new unit-length Float32Array.
@@ -40,11 +37,10 @@ export function l2Normalize(v: Float32Array): Float32Array {
 }
 
 /**
- * Dot product of two equal-length Float32Arrays.
- *
- * For L2-normalised vectors this is equivalent to cosine similarity and
- * roughly 3× faster (no norm recomputation). Use this on the hot inference
- * path where both inputs are guaranteed to be unit-length.
+ * Computes the dot product of two uniform-length Float32Arrays.
+ * When applied to L2-normalized vectors, the dot product mathematically equates to
+ * the cosine similarity. This method is structurally prioritized in the critical inference
+ * path to omit redundant norm recomputations.
  */
 export function dotProduct(a: Float32Array, b: Float32Array): number {
   'worklet';
@@ -71,7 +67,7 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-// ─── Face matching ────────────────────────────────────────────────────────────
+
 
 export interface FaceMatch {
   id:         string;
@@ -80,14 +76,13 @@ export interface FaceMatch {
 }
 
 /**
- * Finds the highest-similarity enrolled face for a query embedding.
- *
- * Both the query and all stored embeddings must be L2-normalised; the dot
- * product is used directly as cosine similarity for efficiency.
+ * Determines the highest-similarity match between a given query embedding and an array of enrolled faces.
+ * Requires all input embeddings to be L2-normalized. Employs the dot product directly to calculate cosine
+ * similarity for maximum evaluation efficiency.
  *
  * @param queryEmbedding  Unit-length Float32Array from the current frame.
  * @param storedFaces     Enrolled faces with unit-length embeddings.
- * @param threshold       Minimum similarity to count as a match (default 0.65).
+ * @param threshold       Minimum similarity required to signify a positive match.
  */
 export function bestMatch(
   queryEmbedding: Float32Array,

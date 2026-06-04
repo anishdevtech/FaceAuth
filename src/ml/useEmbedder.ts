@@ -1,14 +1,6 @@
-/**
- * useEmbedder — Loads the MobileFaceNet TFLite model.
- *
- * Platform notes:
- *   Android — model is copied from assets to DocumentDirectory on first run
- *             (or whenever the copy appears corrupt / mismatched in size).
- *   iOS     — model must be added to the Xcode target's "Copy Bundle Resources"
- *             phase; it is already on disk and needs no copying.
- *
- * The loaded model is disposed on hook unmount to prevent native heap leaks.
- */
+// Manages the loading, initialization, and lifecycle of the MobileFaceNet TFLite model.
+// Implements platform-specific asset extraction (Android) and bundle resolution (iOS),
+// and ensures the model is safely disposed on unmount to prevent native memory leaks.
 
 import { useEffect, useRef, useState } from 'react';
 import { Platform }                    from 'react-native';
@@ -16,12 +8,8 @@ import { loadTensorflowModel }         from 'react-native-fast-tflite';
 import type { TfliteModel }            from 'react-native-fast-tflite/src/specs/Tflite.nitro';
 import RNFS                            from 'react-native-fs';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
 const MODEL_ASSET_NAME = 'models/mobile_face_net.tflite';
 const MODEL_FILE_NAME  = 'mobile_face_net.tflite';
-
-// ─── Platform-aware path resolution ──────────────────────────────────────────
 
 function getModelDestPath(): string {
   return Platform.OS === 'ios'
@@ -30,12 +18,9 @@ function getModelDestPath(): string {
 }
 
 /**
- * Ensures the model file is present and matches the expected asset size.
- *
- * A size mismatch indicates a partial write (e.g. killed mid-copy); the stale
- * file is removed and re-copied so the model never loads from a corrupt state.
- *
- * @returns Resolved filesystem path ready for `loadTensorflowModel`.
+ * Ensures the model file is present on the device filesystem and matches the expected size.
+ * Handles Android asset extraction and validates existing files against partial writes.
+ * @returns Resolved absolute filesystem path ready for tensor inference.
  */
 async function prepareModelFile(): Promise<string> {
   const destPath = getModelDestPath();
@@ -75,8 +60,6 @@ async function prepareModelFile(): Promise<string> {
 
   return destPath;
 }
-
-// ─── Hook ─────────────────────────────────────────────────────────────────────
 
 interface UseEmbedderResult {
   model:     TfliteModel | null;

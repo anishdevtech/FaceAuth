@@ -1,6 +1,5 @@
-/**
- * ManageScreen — View and delete enrolled faces
- */
+// Provides an interface for viewing and managing enrolled facial profiles.
+// Reads directly from the local MMKV storage and allows targeted deletion or bulk clearance of identities.
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
@@ -13,6 +12,8 @@ import {
   View,
 } from 'react-native';
 import { getAllFaces, deleteFace, clearAllFaces, EnrolledFace } from '../storage/faceStore';
+
+const SeparatorComponent = () => <View style={styles.separator} />;
 
 export const ManageScreen: React.FC = () => {
   const [faces, setFaces] = useState<EnrolledFace[]>([]);
@@ -97,7 +98,7 @@ export const ManageScreen: React.FC = () => {
           keyExtractor={item => item.id}
           renderItem={renderItem}
           contentContainerStyle={styles.list}
-          ItemSeparatorComponent={() => <View style={styles.separator} />}
+          ItemSeparatorComponent={SeparatorComponent}
         />
       )}
     </View>
@@ -105,42 +106,46 @@ export const ManageScreen: React.FC = () => {
 };
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#0a0c0f' },
+  root: { flex: 1, backgroundColor: '#000000' },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingTop: Platform.OS === 'ios' ? 52 : 16,
-    paddingHorizontal: 20,
-    paddingBottom: 12,
-    backgroundColor: '#0d1117',
-    borderBottomWidth: 1,
-    borderBottomColor: '#1e2433',
+    paddingTop: Platform.OS === 'ios' ? 60 : 20,
+    paddingHorizontal: 24,
+    paddingBottom: 16,
+    backgroundColor: '#000000',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#2C2C2E',
   },
-  headerTitle: { fontSize: 18, fontWeight: '700', color: '#e8eaf0' },
-  headerSub:   { fontSize: 12, color: '#5c6478', marginTop: 2 },
+  headerTitle: { fontSize: 28, fontWeight: '800', color: '#FFFFFF', letterSpacing: 0.5 },
+  headerSub:   { fontSize: 13, color: '#8E8E93', marginTop: 4, fontWeight: '600' },
   clearBtn: {
-    borderWidth: 1, borderColor: '#ff4d4f',
-    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6,
+    backgroundColor: 'rgba(255, 59, 48, 0.15)',
+    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12,
   },
-  clearBtnText: { color: '#ff4d4f', fontSize: 12, fontWeight: '600' },
-  list:        { padding: 16 },
-  separator:   { height: 1, backgroundColor: '#1e2433' },
-  faceCard:    { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 4 },
+  clearBtnText: { color: '#FF3B30', fontSize: 13, fontWeight: '700' },
+  list:        { padding: 20 },
+  separator:   { height: 12, backgroundColor: 'transparent' },
+  faceCard:    { 
+    flexDirection: 'row', alignItems: 'center', 
+    backgroundColor: '#1C1C1E',
+    padding: 16, borderRadius: 20,
+  },
   avatar:      {
-    width: 48, height: 48, borderRadius: 24,
-    backgroundColor: '#f0a500',
-    alignItems: 'center', justifyContent: 'center', marginRight: 14,
+    width: 52, height: 52, borderRadius: 26,
+    backgroundColor: '#007AFF',
+    alignItems: 'center', justifyContent: 'center', marginRight: 16,
   },
-  avatarText:  { color: '#000', fontSize: 20, fontWeight: '800' },
+  avatarText:  { color: '#FFFFFF', fontSize: 22, fontWeight: '800' },
   faceInfo:    { flex: 1 },
-  faceName:    { color: '#e8eaf0', fontSize: 16, fontWeight: '700', marginBottom: 2 },
-  faceDate:    { color: '#5c6478', fontSize: 11, marginBottom: 2 },
-  faceVec:     { color: '#4ade80', fontSize: 10, fontWeight: '600' },
-  deleteBtn:   { padding: 8, borderRadius: 8, backgroundColor: 'rgba(255,77,79,0.1)' },
+  faceName:    { color: '#FFFFFF', fontSize: 18, fontWeight: '700', marginBottom: 4 },
+  faceDate:    { color: '#8E8E93', fontSize: 12, marginBottom: 2, fontWeight: '500' },
+  faceVec:     { color: '#34C759', fontSize: 11, fontWeight: '700' },
+  deleteBtn:   { padding: 10, borderRadius: 12, backgroundColor: 'rgba(255, 59, 48, 0.1)' },
   deleteBtnText: { fontSize: 20 },
   empty:       { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
-  emptyIcon:   { fontSize: 56, marginBottom: 16 },
-  emptyTitle:  { color: '#e8eaf0', fontSize: 20, fontWeight: '700', marginBottom: 8 },
-  emptySubtitle: { color: '#5c6478', fontSize: 14, textAlign: 'center', lineHeight: 22 },
+  emptyIcon:   { fontSize: 64, marginBottom: 20 },
+  emptyTitle:  { color: '#FFFFFF', fontSize: 22, fontWeight: '800', marginBottom: 10 },
+  emptySubtitle: { color: '#8E8E93', fontSize: 15, textAlign: 'center', lineHeight: 22, fontWeight: '500' },
 });

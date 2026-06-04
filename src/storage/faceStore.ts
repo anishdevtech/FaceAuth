@@ -1,27 +1,19 @@
-/**
- * faceStore — MMKV-backed face enrollment store.
- *
- * Storage is lazy-initialised on first use so a native MMKV failure throws
- * at call-time with a clear message, rather than poisoning the module at
- * load time and making every import resolve to `undefined`.
- *
- * react-native-mmkv v2 API: `createMMKV({ id })` factory (not a class).
- */
+// Manages the persistent storage and retrieval of enrolled facial embeddings.
+// Implements an MMKV-backed storage layer with lazy initialization to gracefully handle
+// instantiation errors and ensure the module does not fail at load time.
 
 import { createMMKV } from 'react-native-mmkv';
 
-// ─── Lazy storage ─────────────────────────────────────────────────────────────
 
 let _storage: ReturnType<typeof createMMKV> | null = null;
 
 function getStorage(): ReturnType<typeof createMMKV> {
   if (!_storage) {
-    _storage = createMMKV({ id: 'faceauth-store-v2' });
+    _storage = createMMKV({ id: 'faceauth-store-v2', encryptionKey: 'faceauth-biometric-aes256' });
   }
   return _storage;
 }
 
-// ─── Constants ────────────────────────────────────────────────────────────────
 
 const INDEX_KEY  = 'face_index_v2';
 const FACE_PREFIX = 'face:';
@@ -33,7 +25,6 @@ const FACE_PREFIX = 'face:';
  */
 export const EXPECTED_EMBEDDING_DIM = 128;
 
-// ─── Internal types ───────────────────────────────────────────────────────────
 
 interface StoredFace {
   id:          string;
@@ -42,7 +33,6 @@ interface StoredFace {
   enrolledAt:  number;
 }
 
-// ─── Private helpers ──────────────────────────────────────────────────────────
 
 function readIndex(): string[] {
   const raw = getStorage().getString(INDEX_KEY);
@@ -70,7 +60,6 @@ function deleteFaceRecord(id: string): void {
   getStorage().remove(`${FACE_PREFIX}${id}`);
 }
 
-// ─── Public types ─────────────────────────────────────────────────────────────
 
 export interface EnrolledFace {
   id:          string;
@@ -79,15 +68,13 @@ export interface EnrolledFace {
   enrolledAt:  number;
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Persists a face embedding.
+ * Persists a new face embedding or updates an existing identity.
+ * Performs a case-insensitive lookup by name. If an identity exists, their
+ * embedding is updated instead of creating a duplicate that would degrade match scoring.
  *
- * Upsert by name (case-insensitive): re-enrolling a known person updates their
- * embedding rather than creating a duplicate that would split match scores.
- *
- * @returns The face ID (new or existing).
+ * @returns The unique identifier of the face record.
  */
 export async function saveFace(name: string, embedding: Float32Array): Promise<string> {
   const trimmedName = name.trim();
@@ -115,8 +102,8 @@ export async function saveFace(name: string, embedding: Float32Array): Promise<s
 }
 
 /**
- * Returns all enrolled faces with Float32Array embeddings ready for inference.
- * Silently skips corrupt entries (wrong embedding length) and emits a warning.
+ * Retrieves all enrolled faces from storage and decodes their embeddings as Float32Arrays.
+ * Invalid entries with mismatched embedding dimensions are skipped automatically.
  */
 export function getAllFaces(): EnrolledFace[] {
   const ids:   string[]       = readIndex();

@@ -1,12 +1,8 @@
-/**
- * EnrollScreen — Register a new face.
- *
- * Flow:
- *   1. Live camera preview with BlazeFace detection overlay.
- *   2. User presses "Capture" → triggers a 5-frame embedding burst.
- *   3. Embeddings are averaged and L2-normalised into a canonical face vector.
- *   4. User types a name → embedding saved to MMKV → success alert.
- */
+// Provides the user interface and orchestration logic for registering new facial profiles.
+// The enrollment workflow consists of:
+// 1. Liveness verification via randomized head tracking.
+// 2. Capture of multiple consecutive frames to generate a robust aggregate embedding.
+// 3. Name assignment and persistent storage of the generated feature vector.
 
 import React, {
   useCallback,
@@ -17,17 +13,19 @@ import React, {
 } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Animated,
   Dimensions,
+  KeyboardAvoidingView,
   Platform,
   StatusBar,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
+  Alert,
   View,
 } from 'react-native';
+import Reanimated, { FadeInDown, FadeOutDown, FadeInUp, FadeOutUp, runOnUI } from 'react-native-reanimated';
 import {
   Camera,
   useCameraDevice,
@@ -36,15 +34,18 @@ import {
 } from 'react-native-vision-camera';
 import { scheduleOnRN } from 'react-native-worklets';
 
-import { useFaceDetector }                                   from '../ml/useFaceDetector';
-import { useEmbedder }                                       from '../ml/useEmbedder';
-import { decodeFaces, type FaceBox }                        from '../ml/blazeface';
-import { resizeToFloat32, cropAndResizeFace, typedArrayToBuffer } from '../ml/preprocessing';
+import { resizeToFloat32, cropFaceToUint8, uint8ToFloat32Normalized, typedArrayToBuffer } from '../ml/preprocessing';
+import { applyCLAHE }                                                from '../ml/clahe';
+import { useFaceDetector } from '../ml/useFaceDetector';
+import { decodeFaces, type FaceBox } from '../ml/blazeface';
+import { useEmbedder } from '../ml/useEmbedder';
 import { l2Normalize }                                       from '../utils/mathUtils';
 import { saveFace }                                          from '../storage/faceStore';
-import { FaceOverlay }                                       from '../components/FaceOverlay';
+import { logAuthEvent }                                      from '../storage/authSync';
+import { generateLivenessSequence, getStepPrompt, checkSequenceTask } from '../liveness/ActiveLivenessSequence';
+import { FaceOverlay }   from '../components/FaceOverlay';
+import { ConfirmModal } from '../components/ConfirmModal';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
@@ -54,10 +55,10 @@ const DETECT_SIZE        = 128;
 const EMBED_SIZE         = 160;
 const PREVIEW_INTERVAL_MS = 300;
 
-// ─── Types ────────────────────────────────────────────────────────────────────
 
 type EnrollState =
   | 'idle'
+  | 'liveness_check'
   | 'capturing'
   | 'captured'
   | 'saving'
@@ -69,11 +70,11 @@ interface ImageMeta {
   orientation: string;
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
 
 export const EnrollScreen: React.FC = () => {
   const { hasPermission, requestPermission } = useCameraPermission();
-  const device = useCameraDevice('front');
+  const [cameraPos, setCameraPos] = useState<'front' | 'back'>('front');
+  const device = useCameraDevice(cameraPos);
 
   const { model: detectModel, anchors, isLoading: detectLoading, error: detectError } = useFaceDetector();
   const { model: embedModel,          isLoading: embedLoading,  error: embedError  } = useEmbedder();
@@ -86,16 +87,33 @@ export const EnrollScreen: React.FC = () => {
   const [personName,    setPersonName]    = useState('');
   const [showNameInput, setShowNameInput] = useState(false);
   const [cameraLayout,  setCameraLayout]  = useState({ width: SCREEN_W, height: SCREEN_H * 0.75 });
+  const [livenessPrompt, setLivenessPrompt] = useState<string | null>(null);
 
-  // Worklet-safe refs — React state cannot be reliably read inside a worklet
-  // because the closure is captured at render time. Refs always expose the
-  // current value without re-capturing.
+  // State management for the generic confirmation modal.
+  const [modal, setModal] = useState<{
+    visible: boolean;
+    icon: string;
+    title: string;
+    subtitle?: string;
+    confirmText?: string;
+    cancelText?: string;
+    confirmDestructive?: boolean;
+    onConfirm: () => void;
+    onCancel?: () => void;
+  }>({
+    visible: false,
+    icon: '',
+    title: '',
+    onConfirm: () => {},
+  });
+  const hideModal = useCallback(() => setModal(m => ({ ...m, visible: false })), []);
+
   const embeddingsAccum   = useRef<number[][]>([]);
-
   const progressAnim = useRef(new Animated.Value(0)).current;
 
-  // ─── Derived ──────────────────────────────────────────────────────────────
+  // Derived boolean flags for UI rendering.
   const isCapturing  = enrollState === 'capturing';
+  const isLiveness   = enrollState === 'liveness_check';
 
   useEffect(() => {
     if (!hasPermission) requestPermission();
@@ -110,15 +128,21 @@ export const EnrollScreen: React.FC = () => {
     }).start();
   }, [captureCount, progressAnim]);
 
-  // ─── Worklet callbacks (scheduled to JS thread) ───────────────────────────
+  // Callbacks executed by the UI thread, triggered from VisionCamera worklets.
 
   const onFaceDetected = useCallback(
-    (box: FaceBox | null, meta: ImageMeta) => {
+    (box: FaceBox | null, meta: ImageMeta, prompt: string | null) => {
       setFaceBox(box);
       setImageMeta(meta);
+      setLivenessPrompt(prompt);
     },
     [],
   );
+
+  const onLivenessPassed = useCallback(() => {
+    setEnrollState('capturing');
+    setLivenessPrompt('Liveness Verified. Capturing...');
+  }, []);
 
   const onEmbeddingCaptured = useCallback((embedding: number[]) => {
     if (embeddingsAccum.current.length >= CAPTURE_BURST) return;
@@ -131,7 +155,6 @@ export const EnrollScreen: React.FC = () => {
       return;
     }
 
-    // All frames captured — average and normalise
     const dim = embedding.length;
     const avg = new Float32Array(dim);
     for (let i = 0; i < dim; i++) {
@@ -151,68 +174,113 @@ export const EnrollScreen: React.FC = () => {
   }, []);
 
   // ─── Frame pipeline ───────────────────────────────────────────────────────
+  // onFrame deps include isLiveness/isCapturing directly — the closure captures
+  // the current value. When state changes, onFrame is recreated and
+  // useFrameOutput picks up the new processor (2 transitions total, no perf issue).
 
-  const frameOutput = useFrameOutput({
-    pixelFormat: 'rgb',
-    enablePhysicalBufferRotation: true,
-    onFrame: (frame) => {
-      'worklet';
+  const onFrame = useCallback((frame: any) => {
+    'worklet';
+    const globalObj = globalThis as any;
 
-      if (!detectModel || !embedModel || !anchors) {
-        frame.dispose();
-        return;
-      }
+    if (!detectModel || !embedModel || !anchors) {
+      frame.dispose();
+      return;
+    }
+
+    try {
+      const now      = Date.now();
+      const pixels   = new Uint8Array(frame.getPixelBuffer());
+      const orient   = frame.orientation;
+      const isWrongDim = frame.width > frame.height;
+      const frameW   = isWrongDim ? frame.height : frame.width;
+      const frameH   = isWrongDim ? frame.width  : frame.height;
+      const fmt      = frame.pixelFormat;
+      const bpp      = (fmt as string) === 'rgb' ? 3 : 4;
+      const rowBytes = frameW * bpp;
+      const meta: ImageMeta = { width: frameW, height: frameH, orientation: orient };
+
+      const lastPrev = globalObj._lastPreviewTime || 0;
+      if (now - lastPrev < PREVIEW_INTERVAL_MS) return;
+      globalObj._lastPreviewTime = now;
+
+      // isLiveness and isCapturing come from the closure (correct values).
+      let topFace: FaceBox | null = null;
+      if (!globalObj._detectInput) globalObj._detectInput = new Float32Array(DETECT_SIZE * DETECT_SIZE * 3);
 
       try {
-        const now      = Date.now();
-        const pixels   = new Uint8Array(frame.getPixelBuffer());
-        const orient   = frame.orientation;
-        const isWrongDim = frame.width > frame.height; // Assuming app is portrait
-        const frameW   = isWrongDim ? frame.height : frame.width;
-        const frameH   = isWrongDim ? frame.width  : frame.height;
-        const fmt      = frame.pixelFormat;
-        const bpp      = (fmt as string) === 'rgb' ? 3 : 4;
-        const rowBytes = frameW * bpp;
-        const meta: ImageMeta = { width: frameW, height: frameH, orientation: orient };
+        resizeToFloat32(pixels, frameW, frameH, DETECT_SIZE, DETECT_SIZE, rowBytes, fmt, globalObj._detectInput);
+        const detOutputs = detectModel.runSync([typedArrayToBuffer(globalObj._detectInput)]);
+        const regressors = new Float32Array(detOutputs[0]);
+        const scores     = new Float32Array(detOutputs[1]);
+        const faces      = decodeFaces(regressors, scores, anchors);
+        topFace = faces.length > 0 ? faces[0] : null;
+      } catch { /* detection error — skip frame */ }
 
-        const lastPrev = (globalThis as any)._lastPreviewTime || 0;
-        if (now - lastPrev >= PREVIEW_INTERVAL_MS) {
-          (globalThis as any)._lastPreviewTime = now;
-
-          let topFace: FaceBox | null = null;
-          try {
-            const inputTensor  = resizeToFloat32(pixels, frameW, frameH, DETECT_SIZE, DETECT_SIZE, rowBytes, fmt);
-            const detOutputs = detectModel.runSync([typedArrayToBuffer(inputTensor)]);
-            const regressors   = new Float32Array(detOutputs[0]);
-            const scores       = new Float32Array(detOutputs[1]);
-            const faces        = decodeFaces(regressors, scores, anchors);
-            topFace = faces.length > 0 ? faces[0] : null;
-          } catch {
-            // Detection failed this frame — skip overlay update
-          }
-
-          scheduleOnRN(onFaceDetected, topFace, meta);
-
-          if (isCapturing && topFace) {
-            try {
-              const faceInput  = cropAndResizeFace(pixels, frameW, frameH, topFace, EMBED_SIZE, EMBED_SIZE, rowBytes, fmt, FACE_CROP_PADDING);
-              const embOutputs = embedModel.runSync([typedArrayToBuffer(faceInput)]);
-              const rawEmb     = new Float32Array(embOutputs[0]);
-              scheduleOnRN(onEmbeddingCaptured, Array.from(l2Normalize(rawEmb)));
-            } catch {
-              scheduleOnRN(onWorkletError, 'Embedding failed — ensure face is clearly visible.');
+      let promptStr: string | null = null;
+      if (isLiveness && topFace) {
+        let seqState = globalObj._enrollSeqState;
+        // Always start a fresh sequence for a new liveness session.
+        // Reset if null OR if previous session already passed.
+        if (!seqState || seqState.passed) {
+          seqState = generateLivenessSequence();
+          globalObj._enrollSeqState = seqState;
+        }
+        if (topFace.landmarks) {
+          const taskPassed = checkSequenceTask(topFace.landmarks as any, seqState);
+          if (taskPassed) {
+            seqState.currentTaskIndex++;
+            seqState.framesInCurrentTask = 0;
+            if (seqState.currentTaskIndex >= seqState.tasks.length) {
+              seqState.passed = true;
+              scheduleOnRN(onLivenessPassed);
             }
           }
         }
-      } finally {
-        frame.dispose();
+        promptStr = getStepPrompt(seqState);
+      } else if (isLiveness && !topFace) {
+        promptStr = 'Position face in frame';
       }
-    },
-  });
+
+      scheduleOnRN(onFaceDetected, topFace, meta, promptStr);
+
+      if (isCapturing && topFace) {
+        try {
+          // Allocate reusable worklet-thread buffers on first use
+          if (!globalObj._cropU8)    globalObj._cropU8    = new Uint8Array(EMBED_SIZE * EMBED_SIZE * 3);
+          if (!globalObj._embedInput) globalObj._embedInput = new Float32Array(EMBED_SIZE * EMBED_SIZE * 3);
+
+          const cropU8     = globalObj._cropU8     as Uint8Array;
+          const embedInput = globalObj._embedInput as Float32Array;
+
+          // Step 1: Crop face into Uint8Array RGB buffer
+          cropFaceToUint8(pixels, frameW, frameH, topFace, EMBED_SIZE, EMBED_SIZE, rowBytes, fmt, cropU8, FACE_CROP_PADDING);
+
+          // Step 2: CLAHE adaptive contrast enhancement (in-place on cropU8)
+          applyCLAHE(cropU8, EMBED_SIZE, EMBED_SIZE, 3, 0, 1, 2, cropU8);
+
+          // Step 3: Normalise Uint8 → Float32 [-1, 1] for MobileFaceNet
+          uint8ToFloat32Normalized(cropU8, embedInput);
+
+          const embOutputs = embedModel.runSync([typedArrayToBuffer(embedInput)]);
+          const rawEmb     = new Float32Array(embOutputs[0] as ArrayBuffer);
+          scheduleOnRN(onEmbeddingCaptured, Array.from(l2Normalize(rawEmb)));
+        } catch {
+          scheduleOnRN(onWorkletError, 'Embedding failed — ensure face is clearly visible.');
+        }
+      }
+    } finally {
+      frame.dispose();
+    }
+  }, [detectModel, embedModel, anchors, isLiveness, isCapturing,
+      onFaceDetected, onLivenessPassed, onEmbeddingCaptured, onWorkletError]);
+
+  const frameOutput = useFrameOutput(useMemo(() => ({
+    pixelFormat: 'rgb',
+    enablePhysicalBufferRotation: true,
+    onFrame,
+  }), [onFrame]));
 
   const cameraOutputs = useMemo(() => [frameOutput], [frameOutput]);
-
-  // ─── Handlers ─────────────────────────────────────────────────────────────
 
   const handleCapture = useCallback(() => {
     if (!faceBox) {
@@ -226,27 +294,44 @@ export const EnrollScreen: React.FC = () => {
     embeddingsAccum.current = [];
     setCaptureCount(0);
     setFinalEmbedding(null);
-    setEnrollState('capturing');
+    setLivenessPrompt('Liveness check…');
+    setEnrollState('liveness_check');
   }, [faceBox, detectModel, embedModel]);
 
   const handleSave = useCallback(async () => {
-    if (!finalEmbedding || !personName.trim()) {
-      Alert.alert('Enter a name', 'Please type the person\'s name before saving.');
-      return;
-    }
+    if (!finalEmbedding || !personName.trim()) return;
     setEnrollState('saving');
+    const name = personName.trim();
     try {
-      await saveFace(personName.trim(), finalEmbedding);
+      await saveFace(name, finalEmbedding);
+      logAuthEvent(name, 'enroll', true);
       setShowNameInput(false);
       setPersonName('');
       embeddingsAccum.current = [];
       setCaptureCount(0);
       setFinalEmbedding(null);
+      setLivenessPrompt(null);
       setEnrollState('idle');
-      Alert.alert('Enrolled', `"${personName.trim()}" has been registered successfully.`);
+      setModal({
+        visible: true,
+        icon: '🎉',
+        title: 'Face Enrolled!',
+        subtitle: `"${name}" has been registered successfully.`,
+        confirmText: 'Done',
+        onConfirm: () => setModal(m => ({ ...m, visible: false })),
+      });
     } catch (e: any) {
-      Alert.alert('Save failed', e?.message ?? 'An unexpected error occurred.');
+      logAuthEvent(name, 'enroll', false);
       setEnrollState('error');
+      setModal({
+        visible: true,
+        icon: '⚠️',
+        title: 'Save Failed',
+        subtitle: e?.message ?? 'An unexpected error occurred.',
+        confirmText: 'OK',
+        confirmDestructive: false,
+        onConfirm: () => setModal(m => ({ ...m, visible: false })),
+      });
     }
   }, [finalEmbedding, personName]);
 
@@ -259,20 +344,26 @@ export const EnrollScreen: React.FC = () => {
     setEnrollState('idle');
   }, []);
 
-  // ─── Derived ──────────────────────────────────────────────────────────────
+  const handleRetryLiveness = useCallback(() => {
+    runOnUI(() => {
+      'worklet';
+      (globalThis as any)._enrollSeqState = null;
+    })();
+  }, []);
 
   const isLoading    = detectLoading || embedLoading;
   const loadError    = detectError   || embedError;
 
   const statusMessage = isLoading
-    ? '⏳ Loading AI models…'
+    ? 'Loading AI models…'
     : isCapturing
       ? `Capturing  ${captureCount} / ${CAPTURE_BURST}`
-      : faceBox
-        ? '✓ Face detected — press Capture'
-        : 'Scanning for face…';
-
-  // ─── Render guards ────────────────────────────────────────────────────────
+      : isLiveness
+        // Show the actual prompt from the worklet; never show the generic fallback
+        ? (livenessPrompt ?? 'Liveness check…')
+        : faceBox
+          ? '\u2713 Face detected — press Capture'
+          : 'Scanning for face…';
 
   if (!hasPermission) {
     return (
@@ -288,23 +379,27 @@ export const EnrollScreen: React.FC = () => {
   if (!device) {
     return (
       <View style={styles.centered}>
-        <Text style={styles.statusText}>No front camera found</Text>
+        <Text style={styles.statusText}>No camera found</Text>
       </View>
     );
   }
 
-  // ─── Render ───────────────────────────────────────────────────────────────
-
   return (
-    <View style={styles.root}>
+    <KeyboardAvoidingView
+      style={styles.root}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={0}
+    >
       <StatusBar barStyle="light-content" backgroundColor="#0a0c0f" />
 
-      {/* Header */}
       <View style={styles.header}>
         <View>
           <Text style={styles.headerTitle}>Enroll New Face</Text>
           <Text style={styles.headerSub}>Stand still · look at camera · press Capture</Text>
         </View>
+        <TouchableOpacity style={styles.flipBtn} onPress={() => setCameraPos(p => p === 'front' ? 'back' : 'front')}>
+          <Text style={styles.flipBtnText}>FLIP</Text>
+        </TouchableOpacity>
         {isCapturing && (
           <View style={styles.burstBadge}>
             <Text style={styles.burstBadgeText}>{captureCount}/{CAPTURE_BURST}</Text>
@@ -312,7 +407,6 @@ export const EnrollScreen: React.FC = () => {
         )}
       </View>
 
-      {/* Camera viewport */}
       <View style={styles.cameraContainer} onLayout={(e) => setCameraLayout(e.nativeEvent.layout)}>
         <Camera
           style={StyleSheet.absoluteFill}
@@ -347,7 +441,7 @@ export const EnrollScreen: React.FC = () => {
             imageOrientation={imageMeta.orientation}
           />
         )}
-
+        
         {isCapturing && (
           <View style={styles.progressContainer}>
             <Animated.View
@@ -364,38 +458,54 @@ export const EnrollScreen: React.FC = () => {
           </View>
         )}
 
-        <View style={styles.statusBanner}>
-          <Text style={styles.statusBannerText}>{statusMessage}</Text>
-        </View>
+        <Reanimated.View 
+          entering={FadeInUp.springify().damping(20).stiffness(200)} 
+          exiting={FadeOutUp} 
+          style={styles.statusBanner}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <Text style={styles.statusBannerText}>{statusMessage}</Text>
+            {isLiveness && (
+              <TouchableOpacity onPress={handleRetryLiveness} style={styles.livenessRetryBtn}>
+                <Text style={styles.livenessRetryText}>Retry</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </Reanimated.View>
       </View>
 
-      {/* Capture button */}
       {!showNameInput && (
-        <View style={styles.controls}>
+        <Reanimated.View 
+          entering={FadeInDown.springify().damping(20).stiffness(200)}
+          exiting={FadeOutDown}
+          style={styles.controls}
+        >
           <TouchableOpacity
-            style={[styles.captureBtn, (!faceBox || isLoading || isCapturing) && styles.captureBtnDisabled]}
+            style={[styles.captureBtn, (!faceBox || isLoading || isCapturing || isLiveness) && styles.captureBtnDisabled]}
             onPress={handleCapture}
-            disabled={!faceBox || isLoading || isCapturing}
+            disabled={!faceBox || isLoading || isCapturing || isLiveness}
             activeOpacity={0.75}
           >
             {isCapturing
-              ? <ActivityIndicator size="small" color="#0a0c0f" />
+              ? <ActivityIndicator size="small" color="#007AFF" />
               : <View style={styles.captureInner} />
             }
           </TouchableOpacity>
           <Text style={styles.captureHint}>{isCapturing ? 'CAPTURING…' : 'CAPTURE'}</Text>
-        </View>
+        </Reanimated.View>
       )}
 
-      {/* Name input sheet */}
       {showNameInput && (
-        <View style={styles.nameSheet}>
+        <Reanimated.View 
+          entering={FadeInDown.springify().damping(20).stiffness(200)}
+          style={styles.nameSheet}
+        >
           <Text style={styles.nameSheetTitle}>Who is this person?</Text>
-          <Text style={styles.nameSheetSub}>{CAPTURE_BURST}-frame embedding captured and averaged.</Text>
+          <Text style={styles.nameSheetSub}>Enter their full name to register their face.</Text>
           <TextInput
             style={styles.nameInput}
-            placeholder="Enter full name…"
-            placeholderTextColor="#3d4561"
+            placeholder="Full name…"
+            placeholderTextColor="#555"
             value={personName}
             onChangeText={setPersonName}
             autoFocus
@@ -415,18 +525,28 @@ export const EnrollScreen: React.FC = () => {
               activeOpacity={0.8}
             >
               {enrollState === 'saving'
-                ? <ActivityIndicator size="small" color="#0a0c0f" />
+                ? <ActivityIndicator size="small" color="#FFFFFF" />
                 : <Text style={styles.saveBtnText}>Save Face</Text>
               }
             </TouchableOpacity>
           </View>
-        </View>
+        </Reanimated.View>
       )}
-    </View>
+
+      <ConfirmModal
+        visible={modal.visible}
+        icon={modal.icon}
+        title={modal.title}
+        subtitle={modal.subtitle}
+        confirmText={modal.confirmText}
+        cancelText={modal.cancelText}
+        confirmDestructive={modal.confirmDestructive}
+        onConfirm={modal.onConfirm}
+        onCancel={modal.onCancel ?? hideModal}
+      />
+    </KeyboardAvoidingView>
   );
 };
-
-// ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   root:    { flex: 1, backgroundColor: '#0a0c0f' },
@@ -444,74 +564,106 @@ const styles = StyleSheet.create({
     borderBottomColor: '#1e2433',
     flexDirection:     'row',
     justifyContent:    'space-between',
-    alignItems:        'flex-end',
+    alignItems:        'center',
   },
   headerTitle: { fontSize: 18, fontWeight: '700', color: '#e8eaf0', letterSpacing: 0.3 },
-  headerSub:   { fontSize: 12, color: '#4a5568', marginTop: 3, letterSpacing: 0.2 },
-  burstBadge:  { backgroundColor: '#f0a500', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
-  burstBadgeText: { color: '#0a0c0f', fontWeight: '800', fontSize: 13 },
+  headerSub:   { fontSize: 12, color: '#8E8E93', marginTop: 3, letterSpacing: 0.2 },
+  burstBadge:  { backgroundColor: '#007AFF', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
+  burstBadgeText: { color: '#FFFFFF', fontWeight: '800', fontSize: 13 },
+  flipBtn: {
+    paddingHorizontal: 12, paddingVertical: 6,
+    backgroundColor: '#1C1C1E', borderRadius: 6,
+    borderWidth: 1, borderColor: '#2C2C2E',
+  },
+  flipBtnText: { color: '#007AFF', fontSize: 12, fontWeight: '600' },
 
   cameraContainer: { flex: 1, width: '100%', overflow: 'hidden', backgroundColor: '#000' },
 
   loadingOverlay: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(10,12,15,0.88)',
+    backgroundColor: 'rgba(28,28,30,0.9)',
     alignItems:      'center',
     justifyContent:  'center',
     gap: 12,
   },
-  loadingText: { color: '#9da3b4', fontSize: 15, fontWeight: '600' },
-  errorText:   { color: '#ff4d4f', fontSize: 14, textAlign: 'center', padding: 24 },
+  loadingText: { color: '#8E8E93', fontSize: 15, fontWeight: '600' },
+  errorText:   { color: '#FF3B30', fontSize: 14, textAlign: 'center', padding: 24 },
 
   progressContainer: {
     position: 'absolute', top: 0, left: 0, right: 0,
-    height: 3, backgroundColor: 'rgba(240,165,0,0.2)',
+    height: 3, backgroundColor: 'rgba(0,122,255,0.2)',
   },
-  progressFill: { height: '100%', backgroundColor: '#f0a500', borderRadius: 2 },
+  progressFill: { height: '100%', backgroundColor: '#007AFF', borderRadius: 2 },
 
   statusBanner: {
-    position: 'absolute', bottom: 0, left: 0, right: 0,
-    backgroundColor:  'rgba(0,0,0,0.65)',
-    paddingVertical:  9, paddingHorizontal: 16,
+    position: 'absolute', top: 20, alignSelf: 'center',
+    backgroundColor: 'rgba(28,28,30,0.85)',
+    paddingVertical: 10, paddingHorizontal: 20,
+    borderRadius: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+    elevation: 8,
   },
-  statusBannerText: { color: '#e8eaf0', fontSize: 13, textAlign: 'center', letterSpacing: 0.2 },
+  statusBannerText: { color: '#FFFFFF', fontSize: 14, textAlign: 'center', fontWeight: '600', letterSpacing: 0.3 },
+  livenessRetryBtn: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  livenessRetryText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
 
-  controls:          { alignItems: 'center', paddingVertical: 18, backgroundColor: '#0d1117' },
+  controls: { 
+    alignItems: 'center', 
+    paddingVertical: 20, 
+    backgroundColor: '#000000' 
+  },
   captureBtn: {
     width: 72, height: 72, borderRadius: 36,
-    borderWidth: 3.5, borderColor: '#f0a500',
+    borderWidth: 3.5, borderColor: '#007AFF',
     alignItems: 'center', justifyContent: 'center',
   },
-  captureBtnDisabled: { borderColor: '#282d3d', opacity: 0.5 },
-  captureInner: { width: 54, height: 54, borderRadius: 27, backgroundColor: '#f0a500' },
-  captureHint:  { color: '#4a5568', fontSize: 10, marginTop: 7, letterSpacing: 2, fontWeight: '700' },
+  captureBtnDisabled: { borderColor: '#2C2C2E', opacity: 0.5 },
+  captureInner: { width: 54, height: 54, borderRadius: 27, backgroundColor: '#007AFF' },
+  captureHint:  { color: '#8E8E93', fontSize: 11, marginTop: 10, letterSpacing: 1.5, fontWeight: '700' },
 
   nameSheet: {
-    padding:        24,
-    paddingBottom:  Platform.OS === 'ios' ? 36 : 24,
-    backgroundColor: '#0d1117',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#1e2433',
+    marginHorizontal: 16,
+    marginBottom: 16,
+    padding: 24,
+    backgroundColor: '#1C1C1E',
+    borderRadius: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.5,
+    shadowRadius: 20,
+    elevation: 12,
   },
-  nameSheetTitle: { color: '#e8eaf0', fontSize: 17, fontWeight: '700', marginBottom: 4 },
-  nameSheetSub:   { color: '#4a5568', fontSize: 12, marginBottom: 16 },
+  nameSheetTitle: { color: '#FFFFFF', fontSize: 18, fontWeight: '700', marginBottom: 6 },
+  nameSheetSub:   { color: '#8E8E93', fontSize: 13, marginBottom: 16 },
   nameInput: {
-    backgroundColor: '#161b27',
-    borderWidth: 1, borderColor: '#252b3b', borderRadius: 10,
-    paddingHorizontal: 14, paddingVertical: 13,
-    color: '#e8eaf0', fontSize: 16, marginBottom: 16,
+    backgroundColor: '#1C1C1E',
+    borderRadius: 12,
+    paddingHorizontal: 16, paddingVertical: 14,
+    color: '#FFFFFF', fontSize: 17, marginBottom: 16,
   },
   nameActions:    { flexDirection: 'row', gap: 12 },
   cancelBtn: {
-    flex: 1, paddingVertical: 13, borderRadius: 10,
-    borderWidth: 1, borderColor: '#252b3b', alignItems: 'center',
+    flex: 1, paddingVertical: 14, borderRadius: 12,
+    backgroundColor: '#1C1C1E', alignItems: 'center',
   },
-  cancelBtnText:    { color: '#9da3b4', fontWeight: '600', fontSize: 15 },
-  saveBtn:          { flex: 2, paddingVertical: 13, borderRadius: 10, backgroundColor: '#f0a500', alignItems: 'center' },
-  saveBtnDisabled:  { backgroundColor: '#282d3d', opacity: 0.5 },
-  saveBtnText:      { color: '#0a0c0f', fontWeight: '800', fontSize: 15 },
+  cancelBtnText:    { color: '#007AFF', fontWeight: '600', fontSize: 16 },
+  saveBtn:          { flex: 2, paddingVertical: 14, borderRadius: 12, backgroundColor: '#34C759', alignItems: 'center' },
+  saveBtnDisabled:  { backgroundColor: '#2C2C2E', opacity: 0.5 },
+  saveBtnText:      { color: '#FFFFFF', fontWeight: '800', fontSize: 16 },
 
-  statusText: { color: '#9da3b4', fontSize: 15, marginBottom: 20, textAlign: 'center', lineHeight: 22 },
-  btn:        { backgroundColor: '#f0a500', paddingHorizontal: 28, paddingVertical: 13, borderRadius: 10 },
-  btnText:    { color: '#0a0c0f', fontWeight: '800', fontSize: 15 },
+  statusText: { color: '#8E8E93', fontSize: 15, marginBottom: 20, textAlign: 'center', lineHeight: 22 },
+  btn:        { backgroundColor: '#007AFF', paddingHorizontal: 28, paddingVertical: 14, borderRadius: 12 },
+  btnText:    { color: '#FFFFFF', fontWeight: '700', fontSize: 16 },
 });

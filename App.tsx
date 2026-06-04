@@ -1,19 +1,15 @@
-/**
- * FaceAuth — NHAI Hackathon 7.0 / Datalake 3.0
- *
- * Day 2: Full offline face recognition pipeline
- *   - BlazeFace detection (on-device, <100ms)
- *   - MobileFaceNet embedding (128-D, offline)
- *   - MMKV local storage
- *   - Three-tab layout: Verify | Enroll | Manage
- */
-import React, { useState } from 'react';
-import { SafeAreaView, StyleSheet } from 'react-native';
+// Main application entry point.
+// Orchestrates the primary tab-based navigation layout (Verify, Enroll, Manage)
+// and initializes global background services such as the SyncManager.
+import React, { useEffect, useState } from 'react';
+import { StyleSheet } from 'react-native';
+import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { VerifyScreen } from './src/screens/VerifyScreen';
 import { EnrollScreen } from './src/screens/EnrollScreen';
 import { ManageScreen } from './src/screens/ManageScreen';
 import { TabBar, Tab } from './src/components/TabBar';
+import { startSyncManager } from './src/sync/SyncManager';
 
 const TABS: Tab[] = [
   { key: 'verify',  label: 'Verify',  icon: '🔍' },
@@ -24,13 +20,21 @@ const TABS: Tab[] = [
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState(0);
 
+  // Initialize the sync manager immediately on app mount to monitor network connectivity changes.
+  useEffect(() => {
+    const unsub = startSyncManager();
+    return unsub;
+  }, []);
+
   return (
-    <SafeAreaView style={styles.root}>
-      {activeTab === 0 && <VerifyScreen />}
-      {activeTab === 1 && <EnrollScreen />}
-      {activeTab === 2 && <ManageScreen />}
-      <TabBar tabs={TABS} activeIndex={activeTab} onPress={setActiveTab} />
-    </SafeAreaView>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.root}>
+        {activeTab === 0 && <VerifyScreen />}
+        {activeTab === 1 && <EnrollScreen />}
+        {activeTab === 2 && <ManageScreen />}
+        <TabBar tabs={TABS} activeIndex={activeTab} onPress={setActiveTab} />
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 };
 

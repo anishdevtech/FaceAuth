@@ -1,3 +1,5 @@
+// Diagnostic component to verify camera access and permissions.
+// Provides a simple preview interface for testing hardware configuration independently of ML processing.
 import React, {useCallback, useEffect, useState} from 'react';
 import {
   StyleSheet,
