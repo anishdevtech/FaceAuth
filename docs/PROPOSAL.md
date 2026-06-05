@@ -2,13 +2,13 @@
 **Project Proposal for NHAI Hackathon 7.0**
 
 ---
-
 **📥 Test the App Now:**
-👉 [Download FaceAuth for arm64-v8a (45 MB)]([../releases/app-arm64-v8a-release.apk?raw=true](https://github.com/anishdevtech/FaceAuth/blob/main/releases/app-arm64-v8a-release.apk)
-👉 [Download FaceAuth for armeabi-v7a (34 MB)]([../releases/](https://github.com/anishdevtech/FaceAuth/blob/main/releases/app-armeabi-v7a-release.apk)
+
+👉 [Download FaceAuth for arm64-v8a (45 MB)](https://github.com/anishdevtech/FaceAuth/blob/main/releases/app-arm64-v8a-release.apk)
+
+👉 [Download FaceAuth for armeabi-v7a (34 MB)](https://github.com/anishdevtech/FaceAuth/blob/main/releases/app-armeabi-v7a-release.apk)
 
 ---
-
 ## 1. The Reality of the Field (Executive Summary)
 
 Let's step out of the air-conditioned server room and onto an Indian highway construction site at 2:00 PM. The sun is blistering, casting harsh shadows under the hardhats of the workers. The nearest cell tower is miles away, leaving the government-issued Android device with zero internet connectivity. 
