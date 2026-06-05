@@ -4,8 +4,8 @@
 ---
 
 **📥 Test the App Now:**
-👉 [Download FaceAuth for arm64-v8a (45 MB)](../releases/app-arm64-v8a-release.apk?raw=true)
-👉 [Download FaceAuth for armeabi-v7a (34 MB)](../releases/app-armeabi-v7a-release.apk?raw=true)
+👉 [Download FaceAuth for arm64-v8a (45 MB)]([../releases/app-arm64-v8a-release.apk?raw=true](https://github.com/anishdevtech/FaceAuth/blob/main/releases/app-arm64-v8a-release.apk)
+👉 [Download FaceAuth for armeabi-v7a (34 MB)]([../releases/](https://github.com/anishdevtech/FaceAuth/blob/main/releases/app-armeabi-v7a-release.apk)
 
 ---
 
