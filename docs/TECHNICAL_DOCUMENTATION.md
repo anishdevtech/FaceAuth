@@ -3,7 +3,7 @@
 **NHAI Hackathon 7.0 Submission**
 **Offline Face Recognition & Liveness Detection for Datalake 3.0**
 
-*View the **[Project Proposal (Markdown)](https://github.com/anishdevtech/FaceAuth/blob/main/docs/PROPOSAL.md)** or **[Project Proposal (PDF)](https://github.com/anishdevtech/FaceAuth/blob/main/docs/PROPOSAL.pdf)** for official submission details.*
+*View the **[Project Proposal (Markdown)](https://github.com/anishdevtech/FaceAuth/blob/main/docs/PROPOSAL.md)** 
 
 ---
 
