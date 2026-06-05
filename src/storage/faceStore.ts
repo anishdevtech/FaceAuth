@@ -20,10 +20,10 @@ const FACE_PREFIX = 'face:';
 
 /**
  * Embedding dimension expected from MobileFaceNet.
- * MobileFaceNet outputs 128-dimensional embeddings; update here if you swap
+ * MobileFaceNet outputs 192-dimensional embeddings; update here if you swap
  * the backbone.
  */
-export const EXPECTED_EMBEDDING_DIM = 128;
+export const EXPECTED_EMBEDDING_DIM = 192;
 
 
 interface StoredFace {
@@ -39,6 +39,28 @@ function readIndex(): string[] {
   if (!raw) return [];
   try   { return JSON.parse(raw) as string[]; }
   catch { return []; }
+}
+
+let _indexMigrated = false;
+function migrateLegacyFaceIndex() {
+  if (_indexMigrated) return;
+  _indexMigrated = true;
+  
+  const ids = readIndex();
+  let migratedCount = 0;
+  for (const id of ids) {
+    const face = readFace(id);
+    if (face) {
+      const lookupKey = `name_lookup_${face.name.toLowerCase()}`;
+      if (!getStorage().contains(lookupKey)) {
+        getStorage().set(lookupKey, face.id);
+        migratedCount++;
+      }
+    }
+  }
+  if (migratedCount > 0) {
+    console.log(`[faceStore] Migrated ${migratedCount} legacy faces to O(1) index.`);
+  }
 }
 
 function writeIndex(ids: string[]): void {
@@ -77,13 +99,13 @@ export interface EnrolledFace {
  * @returns The unique identifier of the face record.
  */
 export async function saveFace(name: string, embedding: Float32Array): Promise<string> {
+  migrateLegacyFaceIndex();
+  
   const trimmedName = name.trim();
-  const ids         = readIndex();
-
-  const existingId = ids.find(id => {
-    const face = readFace(id);
-    return face?.name.toLowerCase() === trimmedName.toLowerCase();
-  });
+  const lowerName = trimmedName.toLowerCase();
+  
+  // O(1) lookup using the dedicated name index
+  const existingId = getStorage().getString(`name_lookup_${lowerName}`);
 
   if (existingId) {
     writeFace({
@@ -97,6 +119,11 @@ export async function saveFace(name: string, embedding: Float32Array): Promise<s
 
   const id = `f_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   writeFace({ id, name: trimmedName, embedding: Array.from(embedding), enrolledAt: Date.now() });
+  
+  // Store the name map mapping for future O(1) lookups
+  getStorage().set(`name_lookup_${lowerName}`, id);
+  
+  const ids = readIndex();
   writeIndex([...ids, id]);
   return id;
 }
@@ -106,6 +133,8 @@ export async function saveFace(name: string, embedding: Float32Array): Promise<s
  * Invalid entries with mismatched embedding dimensions are skipped automatically.
  */
 export function getAllFaces(): EnrolledFace[] {
+  migrateLegacyFaceIndex();
+  
   const ids:   string[]       = readIndex();
   const faces: EnrolledFace[] = [];
 
@@ -135,6 +164,10 @@ export function getAllFaces(): EnrolledFace[] {
 
 /** Deletes a single enrolled face by ID. */
 export function deleteFace(id: string): void {
+  const face = readFace(id);
+  if (face) {
+    getStorage().remove(`name_lookup_${face.name.toLowerCase()}`);
+  }
   deleteFaceRecord(id);
   writeIndex(readIndex().filter(fid => fid !== id));
 }
@@ -142,7 +175,11 @@ export function deleteFace(id: string): void {
 /** Removes every enrolled face and resets the index. */
 export function clearAllFaces(): void {
   const ids = readIndex();
-  for (const id of ids) deleteFaceRecord(id);
+  for (const id of ids) {
+    const face = readFace(id);
+    if (face) getStorage().remove(`name_lookup_${face.name.toLowerCase()}`);
+    deleteFaceRecord(id);
+  }
   getStorage().remove(INDEX_KEY);
 }
 
@@ -156,6 +193,9 @@ export function getFaceCount(): number {
  * Useful for showing a confirmation before overwriting.
  */
 export function isNameEnrolled(name: string): boolean {
+  migrateLegacyFaceIndex();
+  
   const lower = name.trim().toLowerCase();
-  return readIndex().some(id => readFace(id)?.name.toLowerCase() === lower);
+  // O(1) lookup
+  return getStorage().contains(`name_lookup_${lower}`);
 }

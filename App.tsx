@@ -8,13 +8,16 @@ import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import { VerifyScreen } from './src/screens/VerifyScreen';
 import { EnrollScreen } from './src/screens/EnrollScreen';
 import { ManageScreen } from './src/screens/ManageScreen';
+import { LogsScreen }   from './src/screens/LogsScreen';
 import { TabBar, Tab } from './src/components/TabBar';
 import { startSyncManager } from './src/sync/SyncManager';
+import { ScanFace, UserPlus, Users, FileText } from 'lucide-react-native';
 
 const TABS: Tab[] = [
-  { key: 'verify',  label: 'Verify',  icon: '🔍' },
-  { key: 'enroll',  label: 'Enroll',  icon: '➕' },
-  { key: 'manage',  label: 'Manage',  icon: '👥' },
+  { key: 'verify',  labelKey: 'tab_verify',  Icon: ScanFace },
+  { key: 'enroll',  labelKey: 'tab_enroll',  Icon: UserPlus },
+  { key: 'manage',  labelKey: 'tab_manage',  Icon: Users },
+  { key: 'logs',    labelKey: 'tab_logs',    Icon: FileText },
 ];
 
 const App: React.FC = () => {
@@ -32,6 +35,7 @@ const App: React.FC = () => {
         {activeTab === 0 && <VerifyScreen />}
         {activeTab === 1 && <EnrollScreen />}
         {activeTab === 2 && <ManageScreen />}
+        {activeTab === 3 && <LogsScreen />}
         <TabBar tabs={TABS} activeIndex={activeTab} onPress={setActiveTab} />
       </SafeAreaView>
     </SafeAreaProvider>

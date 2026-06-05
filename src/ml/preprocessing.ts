@@ -16,20 +16,23 @@ interface PixelLayout {
  * Uses `startsWith()` to stay compatible across VisionCamera version variants
  * (e.g. 'bgra', 'bgra8888', 'bgra-8-bit').
  */
-function resolvePixelLayout(pixelFormat: string): PixelLayout {
+export function resolvePixelLayout(pixelFormat: string): PixelLayout {
   'worklet';
-  const fmt = pixelFormat.toLowerCase();
+  const format = pixelFormat.toLowerCase();
 
-  if (fmt.startsWith('bgra')) {
+  if (format.startsWith('bgra')) {
     return { bytesPerPixel: 4, rOffset: 2, gOffset: 1, bOffset: 0 };
   }
-  if (fmt.startsWith('rgba')) {
+  if (format.startsWith('rgba')) {
     return { bytesPerPixel: 4, rOffset: 0, gOffset: 1, bOffset: 2 };
   }
-  if (fmt.startsWith('rgb')) {
+  if (format.startsWith('rgb') || format.startsWith('yuv')) {
     return { bytesPerPixel: 3, rOffset: 0, gOffset: 1, bOffset: 2 };
   }
-
+  if (format.startsWith('bgr')) {
+    return { bytesPerPixel: 3, rOffset: 2, gOffset: 1, bOffset: 0 };
+  }
+  
   // Default fallback for unknown formats is BGRA, the standard Android default.
   return { bytesPerPixel: 4, rOffset: 2, gOffset: 1, bOffset: 0 };
 }
@@ -41,14 +44,14 @@ function resolvePixelLayout(pixelFormat: string): PixelLayout {
  */
 export function typedArrayToBuffer(arr: Float32Array | Uint8Array): ArrayBuffer {
   'worklet';
-  return arr.buffer as ArrayBuffer;
+  return arr.slice().buffer as ArrayBuffer;
 }
 
 /**
- * Nearest-neighbour resize of a flat pixel buffer to `dstW × dstH`.
+ * Nearest-neighbour resize of a flat pixel buffer to `dstW Ã— dstH`.
  *
- * Output: Float32Array in HWC layout, normalised to [0, 1] — the format
- * expected by BlazeFace (128×128×3 input).
+ * Output: Float32Array in HWC layout, normalised to [0, 1] â€” the format
+ * expected by BlazeFace (128Ã—128Ã—3 input).
  *
  * Pixel-centre sampling `(i + 0.5) / dst` maps destination pixels evenly
  * across the source extent, preventing the last row/column from never being
@@ -106,10 +109,10 @@ export function resizeToFloat32(
 
 /**
  * Crops a padded face region from the full frame and resizes it to
- * `dstW × dstH`.
+ * `dstW Ã— dstH`.
  *
- * Output: Float32Array in HWC layout, normalised to [−1, 1] — the format
- * expected by MobileFaceNet (112×112×3 input, pixel = (raw − 127.5) / 127.5).
+ * Output: Float32Array in HWC layout, normalised to [âˆ’1, 1] â€” the format
+ * expected by MobileFaceNet (112Ã—112Ã—3 input, pixel = (raw âˆ’ 127.5) / 127.5).
  *
  * @param pixels      Raw frame buffer.
  * @param srcW        Logical frame width.
@@ -192,7 +195,7 @@ export function cropAndResizeFace(
 
 /**
  * Crops a padded face region from the full frame and resizes it into a
- * Uint8Array with packed RGB (3 bpp) layout — the format expected by
+ * Uint8Array with packed RGB (3 bpp) layout â€” the format expected by
  * `applyCLAHE()`.
  *
  * This is deliberately separate from `cropAndResizeFace` so the existing
@@ -266,11 +269,132 @@ export function cropFaceToUint8(
 }
 
 /**
+ * Extracts a 112x112 face image aligned exactly to the MobileFaceNet/ArcFace
+ * standard coordinates using a Similarity Transform (Affine Transformation).
+ *
+ * It takes the left and right eye landmarks, computes the inverse affine matrix,
+ * and uses Bilinear Interpolation to sample the aligned pixels directly from
+ * the raw camera frame.
+ *
+ * @param pixels      Raw frame buffer.
+ * @param srcW        Logical frame width.
+ * @param srcH        Logical frame height.
+ * @param landmarks   Normalized [0..1] array of 12 floats from BlazeFace.
+ * @param bytesPerRow Frame row stride in bytes.
+ * @param pixelFormat VisionCamera format string.
+ * @param outBuffer   Pre-allocated Uint8Array(112 * 112 * 3).
+ */
+export function alignFaceToUint8(
+  pixels:      Uint8Array,
+  srcW:        number,
+  srcH:        number,
+  landmarks:   Float32Array,
+  bytesPerRow: number,
+  pixelFormat: string,
+  outBuffer:   Uint8Array,
+): Uint8Array {
+  'worklet';
+  const { bytesPerPixel, rOffset, gOffset, bOffset } = resolvePixelLayout(pixelFormat);
+
+  const REYE = 0;
+  const LEYE = 1;
+
+  // 1. Identify which eye is on the left side of the image
+  let p1x, p1y, p2x, p2y;
+  if (landmarks[REYE * 2] < landmarks[LEYE * 2]) {
+    p1x = landmarks[REYE * 2] * srcW;
+    p1y = landmarks[REYE * 2 + 1] * srcH;
+    p2x = landmarks[LEYE * 2] * srcW;
+    p2y = landmarks[LEYE * 2 + 1] * srcH;
+  } else {
+    p1x = landmarks[LEYE * 2] * srcW;
+    p1y = landmarks[LEYE * 2 + 1] * srcH;
+    p2x = landmarks[REYE * 2] * srcW;
+    p2y = landmarks[REYE * 2 + 1] * srcH;
+  }
+
+  // 2. MobileFaceNet standard coordinates for 112x112
+  const dstW = 112;
+  const dstH = 112;
+  const dx1 = 38.29;
+  const dx2 = 73.53;
+  const dy  = 51.69;
+
+  // 3. Compute Inverse Similarity Transform Matrix components
+  const d_dx = dx2 - dx1;
+  const a = (p2x - p1x) / d_dx;
+  const b = (p2y - p1y) / d_dx;
+
+  const tx = p1x - a * dx1 + b * dy;
+  const ty = p1y - b * dx1 - a * dy;
+
+  // 4. Bilinear sampling from source image
+  for (let y = 0; y < dstH; y++) {
+    const sx_row = -b * y + tx;
+    const sy_row =  a * y + ty;
+    const dstRowBase = y * dstW * 3;
+
+    for (let x = 0; x < dstW; x++) {
+      const sx = a * x + sx_row;
+      const sy = b * x + sy_row;
+
+      const sx_i = Math.floor(sx);
+      const sy_i = Math.floor(sy);
+
+      const px = sx - sx_i;
+      const py = sy - sy_i;
+      const pxInv = 1 - px;
+      const pyInv = 1 - py;
+
+      const x1 = clamp(sx_i, 0, srcW - 1);
+      const y1 = clamp(sy_i, 0, srcH - 1);
+      const x2 = clamp(sx_i + 1, 0, srcW - 1);
+      const y2 = clamp(sy_i + 1, 0, srcH - 1);
+
+      const row1 = y1 * bytesPerRow;
+      const row2 = y2 * bytesPerRow;
+      const idx11 = row1 + x1 * bytesPerPixel;
+      const idx12 = row1 + x2 * bytesPerPixel;
+      const idx21 = row2 + x1 * bytesPerPixel;
+      const idx22 = row2 + x2 * bytesPerPixel;
+
+      const baseDst = dstRowBase + x * 3;
+      
+      // Interpolate R
+      outBuffer[baseDst    ] = Math.round(
+        pixels[idx11 + rOffset] * pxInv * pyInv +
+        pixels[idx12 + rOffset] * px    * pyInv +
+        pixels[idx21 + rOffset] * pxInv * py +
+        pixels[idx22 + rOffset] * px    * py
+      );
+      
+      // Interpolate G
+      outBuffer[baseDst + 1] = Math.round(
+        pixels[idx11 + gOffset] * pxInv * pyInv +
+        pixels[idx12 + gOffset] * px    * pyInv +
+        pixels[idx21 + gOffset] * pxInv * py +
+        pixels[idx22 + gOffset] * px    * py
+      );
+      
+      // Interpolate B
+      outBuffer[baseDst + 2] = Math.round(
+        pixels[idx11 + bOffset] * pxInv * pyInv +
+        pixels[idx12 + bOffset] * px    * pyInv +
+        pixels[idx21 + bOffset] * pxInv * py +
+        pixels[idx22 + bOffset] * px    * py
+      );
+    }
+  }
+
+  return outBuffer;
+}
+
+/**
  * Converts a Uint8Array RGB buffer (e.g. CLAHE output) into a Float32Array
- * normalised to [−1, 1] for MobileFaceNet input.
+ * normalised to [âˆ’1, 1] for MobileFaceNet input.
  *
  * @param src   Uint8Array of packed RGB pixels (3 bpp, no alpha).
- * @param out   Pre-allocated Float32Array of the same pixel count × 3.
+ * @param out   Pre-allocated Float32Array of the same pixel count Ã— 3.
  */
 export function uint8ToFloat32Normalized(
   src: Uint8Array,
@@ -283,3 +407,4 @@ export function uint8ToFloat32Normalized(
   }
   return out;
 }
+

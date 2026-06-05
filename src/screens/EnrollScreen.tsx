@@ -25,7 +25,7 @@ import {
   Alert,
   View,
 } from 'react-native';
-import Reanimated, { FadeInDown, FadeOutDown, FadeInUp, FadeOutUp, runOnUI } from 'react-native-reanimated';
+import Reanimated, { runOnUI } from 'react-native-reanimated';
 import {
   Camera,
   useCameraDevice,
@@ -34,7 +34,7 @@ import {
 } from 'react-native-vision-camera';
 import { scheduleOnRN } from 'react-native-worklets';
 
-import { resizeToFloat32, cropFaceToUint8, uint8ToFloat32Normalized, typedArrayToBuffer } from '../ml/preprocessing';
+import { resizeToFloat32, alignFaceToUint8, uint8ToFloat32Normalized, typedArrayToBuffer } from '../ml/preprocessing';
 import { applyCLAHE }                                                from '../ml/clahe';
 import { useFaceDetector } from '../ml/useFaceDetector';
 import { decodeFaces, type FaceBox } from '../ml/blazeface';
@@ -45,15 +45,17 @@ import { logAuthEvent }                                      from '../storage/au
 import { generateLivenessSequence, getStepPrompt, checkSequenceTask } from '../liveness/ActiveLivenessSequence';
 import { FaceOverlay }   from '../components/FaceOverlay';
 import { ConfirmModal } from '../components/ConfirmModal';
+import { useTranslation } from '../i18n';
+import { Settings } from 'lucide-react-native';
+import { LanguagePickerModal } from '../components/LanguagePickerModal';
 
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 const CAPTURE_BURST      = 5;
-const FACE_CROP_PADDING  = 0.25;
 const DETECT_SIZE        = 128;
-const EMBED_SIZE         = 160;
-const PREVIEW_INTERVAL_MS = 300;
+const EMBED_SIZE         = 112;
+const PREVIEW_INTERVAL_MS = 350;
 
 
 type EnrollState =
@@ -74,6 +76,8 @@ interface ImageMeta {
 export const EnrollScreen: React.FC = () => {
   const { hasPermission, requestPermission } = useCameraPermission();
   const [cameraPos, setCameraPos] = useState<'front' | 'back'>('front');
+  const { t } = useTranslation();
+  const [langModalVisible, setLangModalVisible] = useState(false);
   const device = useCameraDevice(cameraPos);
 
   const { model: detectModel, anchors, isLoading: detectLoading, error: detectError } = useFaceDetector();
@@ -141,7 +145,7 @@ export const EnrollScreen: React.FC = () => {
 
   const onLivenessPassed = useCallback(() => {
     setEnrollState('capturing');
-    setLivenessPrompt('Liveness Verified. Capturing...');
+    setLivenessPrompt(null);
   }, []);
 
   const onEmbeddingCaptured = useCallback((embedding: number[]) => {
@@ -195,8 +199,7 @@ export const EnrollScreen: React.FC = () => {
       const frameW   = isWrongDim ? frame.height : frame.width;
       const frameH   = isWrongDim ? frame.width  : frame.height;
       const fmt      = frame.pixelFormat;
-      const bpp      = (fmt as string) === 'rgb' ? 3 : 4;
-      const rowBytes = frameW * bpp;
+      const rowBytes = frame.bytesPerRow;
       const meta: ImageMeta = { width: frameW, height: frameH, orientation: orient };
 
       const lastPrev = globalObj._lastPreviewTime || 0;
@@ -214,6 +217,37 @@ export const EnrollScreen: React.FC = () => {
         const scores     = new Float32Array(detOutputs[1]);
         const faces      = decodeFaces(regressors, scores, anchors);
         topFace = faces.length > 0 ? faces[0] : null;
+
+        // Temporal Smoothing (EMA) for BlazeFace jitter reduction
+        if (topFace) {
+          if (!globalObj._smoothedFace) {
+            globalObj._smoothedFace = {
+              xmin: topFace.xmin, ymin: topFace.ymin, xmax: topFace.xmax, ymax: topFace.ymax,
+              landmarks: topFace.landmarks ? new Float32Array(topFace.landmarks) : new Float32Array(12)
+            };
+          } else {
+            const ALPHA = 0.5; // Exponential Moving Average blend factor
+            const s = globalObj._smoothedFace;
+            s.xmin = s.xmin + ALPHA * (topFace.xmin - s.xmin);
+            s.ymin = s.ymin + ALPHA * (topFace.ymin - s.ymin);
+            s.xmax = s.xmax + ALPHA * (topFace.xmax - s.xmax);
+            s.ymax = s.ymax + ALPHA * (topFace.ymax - s.ymax);
+            if (topFace.landmarks) {
+              for (let i = 0; i < 12; i++) {
+                s.landmarks[i] = s.landmarks[i] + ALPHA * (topFace.landmarks[i] - s.landmarks[i]);
+              }
+            }
+          }
+          // Overwrite raw coordinates with mathematically smoothed coordinates
+          const s = globalObj._smoothedFace;
+          topFace.xmin = s.xmin;
+          topFace.ymin = s.ymin;
+          topFace.xmax = s.xmax;
+          topFace.ymax = s.ymax;
+          topFace.landmarks = s.landmarks;
+        } else {
+          globalObj._smoothedFace = null;
+        }
       } catch { /* detection error — skip frame */ }
 
       let promptStr: string | null = null;
@@ -237,11 +271,11 @@ export const EnrollScreen: React.FC = () => {
           }
         }
         promptStr = getStepPrompt(seqState);
-      } else if (isLiveness && !topFace) {
-        promptStr = 'Position face in frame';
-      }
+        } else if (isLiveness && !topFace) {
+          promptStr = 'position_face';
+        }
 
-      scheduleOnRN(onFaceDetected, topFace, meta, promptStr);
+        scheduleOnRN(onFaceDetected, topFace, meta, promptStr);
 
       if (isCapturing && topFace) {
         try {
@@ -252,8 +286,8 @@ export const EnrollScreen: React.FC = () => {
           const cropU8     = globalObj._cropU8     as Uint8Array;
           const embedInput = globalObj._embedInput as Float32Array;
 
-          // Step 1: Crop face into Uint8Array RGB buffer
-          cropFaceToUint8(pixels, frameW, frameH, topFace, EMBED_SIZE, EMBED_SIZE, rowBytes, fmt, cropU8, FACE_CROP_PADDING);
+          // Step 1: Align face into Uint8Array RGB buffer
+          alignFaceToUint8(pixels, frameW, frameH, topFace.landmarks as Float32Array, rowBytes, fmt, cropU8);
 
           // Step 2: CLAHE adaptive contrast enhancement (in-place on cropU8)
           applyCLAHE(cropU8, EMBED_SIZE, EMBED_SIZE, 3, 0, 1, 2, cropU8);
@@ -294,7 +328,7 @@ export const EnrollScreen: React.FC = () => {
     embeddingsAccum.current = [];
     setCaptureCount(0);
     setFinalEmbedding(null);
-    setLivenessPrompt('Liveness check…');
+    setLivenessPrompt(null);
     setEnrollState('liveness_check');
   }, [faceBox, detectModel, embedModel]);
 
@@ -303,8 +337,8 @@ export const EnrollScreen: React.FC = () => {
     setEnrollState('saving');
     const name = personName.trim();
     try {
-      await saveFace(name, finalEmbedding);
-      logAuthEvent(name, 'enroll', true);
+      const newId = await saveFace(name, finalEmbedding);
+      logAuthEvent(newId, name, 'enroll', true);
       setShowNameInput(false);
       setPersonName('');
       embeddingsAccum.current = [];
@@ -321,7 +355,7 @@ export const EnrollScreen: React.FC = () => {
         onConfirm: () => setModal(m => ({ ...m, visible: false })),
       });
     } catch (e: any) {
-      logAuthEvent(name, 'enroll', false);
+      logAuthEvent(null, name, 'enroll', false);
       setEnrollState('error');
       setModal({
         visible: true,
@@ -354,16 +388,26 @@ export const EnrollScreen: React.FC = () => {
   const isLoading    = detectLoading || embedLoading;
   const loadError    = detectError   || embedError;
 
-  const statusMessage = isLoading
-    ? 'Loading AI models…'
-    : isCapturing
-      ? `Capturing  ${captureCount} / ${CAPTURE_BURST}`
-      : isLiveness
-        // Show the actual prompt from the worklet; never show the generic fallback
-        ? (livenessPrompt ?? 'Liveness check…')
-        : faceBox
-          ? '\u2713 Face detected — press Capture'
-          : 'Scanning for face…';
+  let statusMessage = '';
+  if (isLoading) {
+    statusMessage = t('enroll_loading');
+  } else if (isCapturing) {
+    statusMessage = `Capturing  ${captureCount} / ${CAPTURE_BURST}`;
+  } else if (isLiveness) {
+    if (!livenessPrompt) {
+      statusMessage = 'Liveness check...';
+    } else if (livenessPrompt === 'turn_left') {
+      statusMessage = t('liveness_left');
+    } else if (livenessPrompt === 'turn_right') {
+      statusMessage = t('liveness_right');
+    } else {
+      statusMessage = t('liveness_left'); // fallback
+    }
+  } else if (faceBox) {
+    statusMessage = '\u2713 Face detected — press Capture';
+  } else {
+    statusMessage = 'Scanning for face…';
+  }
 
   if (!hasPermission) {
     return (
@@ -393,18 +437,25 @@ export const EnrollScreen: React.FC = () => {
       <StatusBar barStyle="light-content" backgroundColor="#0a0c0f" />
 
       <View style={styles.header}>
-        <View>
-          <Text style={styles.headerTitle}>Enroll New Face</Text>
-          <Text style={styles.headerSub}>Stand still · look at camera · press Capture</Text>
-        </View>
-        <TouchableOpacity style={styles.flipBtn} onPress={() => setCameraPos(p => p === 'front' ? 'back' : 'front')}>
-          <Text style={styles.flipBtnText}>FLIP</Text>
-        </TouchableOpacity>
-        {isCapturing && (
-          <View style={styles.burstBadge}>
-            <Text style={styles.burstBadgeText}>{captureCount}/{CAPTURE_BURST}</Text>
+        <View style={{ flex: 1, paddingRight: 10 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <Text style={styles.screenTitle}>{t('enroll_title')}</Text>
           </View>
-        )}
+          <Text style={styles.subtitle}>{t('enroll_subtitle')}</Text>
+        </View>
+        <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+          <TouchableOpacity onPress={() => setLangModalVisible(true)} style={styles.settingsIcon}>
+            <Settings size={20} color="#6b7280" />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.flipBtn} onPress={() => setCameraPos(p => p === 'front' ? 'back' : 'front')}>
+            <Text style={styles.flipBtnText}>{t('enroll_flip')}</Text>
+          </TouchableOpacity>
+          {isCapturing && (
+            <View style={styles.modeBadge}>
+              <Text style={styles.modeBadgeText}>{captureCount}/{CAPTURE_BURST}</Text>
+            </View>
+          )}
+        </View>
       </View>
 
       <View style={styles.cameraContainer} onLayout={(e) => setCameraLayout(e.nativeEvent.layout)}>
@@ -419,7 +470,7 @@ export const EnrollScreen: React.FC = () => {
         {isLoading && (
           <View style={styles.loadingOverlay}>
             <ActivityIndicator size="large" color="#f0a500" />
-            <Text style={styles.loadingText}>Loading AI models…</Text>
+            <Text style={styles.loadingText}>{t('enroll_loading')}</Text>
           </View>
         )}
 
@@ -459,15 +510,13 @@ export const EnrollScreen: React.FC = () => {
         )}
 
         <Reanimated.View 
-          entering={FadeInUp.springify().damping(20).stiffness(200)} 
-          exiting={FadeOutUp} 
           style={styles.statusBanner}
         >
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-            <Text style={styles.statusBannerText}>{statusMessage}</Text>
+            <Text style={styles.statusBannerText} numberOfLines={1} adjustsFontSizeToFit>{statusMessage}</Text>
             {isLiveness && (
               <TouchableOpacity onPress={handleRetryLiveness} style={styles.livenessRetryBtn}>
-                <Text style={styles.livenessRetryText}>Retry</Text>
+                <Text style={styles.livenessRetryText}>↻</Text>
               </TouchableOpacity>
             )}
           </View>
@@ -476,8 +525,6 @@ export const EnrollScreen: React.FC = () => {
 
       {!showNameInput && (
         <Reanimated.View 
-          entering={FadeInDown.springify().damping(20).stiffness(200)}
-          exiting={FadeOutDown}
           style={styles.controls}
         >
           <TouchableOpacity
@@ -491,21 +538,19 @@ export const EnrollScreen: React.FC = () => {
               : <View style={styles.captureInner} />
             }
           </TouchableOpacity>
-          <Text style={styles.captureHint}>{isCapturing ? 'CAPTURING…' : 'CAPTURE'}</Text>
         </Reanimated.View>
       )}
 
       {showNameInput && (
         <Reanimated.View 
-          entering={FadeInDown.springify().damping(20).stiffness(200)}
-          style={styles.nameSheet}
+          style={styles.modalContainer}
         >
-          <Text style={styles.nameSheetTitle}>Who is this person?</Text>
-          <Text style={styles.nameSheetSub}>Enter their full name to register their face.</Text>
+          <Text style={styles.modalTitle}>{t('enroll_who')}</Text>
+          <Text style={styles.modalSub}>{t('enroll_enter_name')}</Text>
           <TextInput
-            style={styles.nameInput}
+            style={styles.textInput}
             placeholder="Full name…"
-            placeholderTextColor="#555"
+            placeholderTextColor="#3d4451"
             value={personName}
             onChangeText={setPersonName}
             autoFocus
@@ -516,17 +561,17 @@ export const EnrollScreen: React.FC = () => {
           />
           <View style={styles.nameActions}>
             <TouchableOpacity style={styles.cancelBtn} onPress={handleCancel} activeOpacity={0.75}>
-              <Text style={styles.cancelBtnText}>Cancel</Text>
+              <Text style={styles.cancelBtnText}>{t('cancel')}</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.saveBtn, (!personName.trim() || enrollState === 'saving') && styles.saveBtnDisabled]}
+              style={[styles.ctaButton, (!personName.trim() || enrollState === 'saving') && styles.saveBtnDisabled]}
               onPress={handleSave}
               disabled={!personName.trim() || enrollState === 'saving'}
               activeOpacity={0.8}
             >
               {enrollState === 'saving'
-                ? <ActivityIndicator size="small" color="#FFFFFF" />
-                : <Text style={styles.saveBtnText}>Save Face</Text>
+                ? <ActivityIndicator size="small" color="#000000" />
+                : <Text style={styles.ctaText}>{t('enroll_save')}</Text>
               }
             </TouchableOpacity>
           </View>
@@ -544,6 +589,8 @@ export const EnrollScreen: React.FC = () => {
         onConfirm={modal.onConfirm}
         onCancel={modal.onCancel ?? hideModal}
       />
+
+      <LanguagePickerModal visible={langModalVisible} onClose={() => setLangModalVisible(false)} />
     </KeyboardAvoidingView>
   );
 };
@@ -556,44 +603,76 @@ const styles = StyleSheet.create({
   },
 
   header: {
-    paddingTop:        Platform.OS === 'ios' ? 56 : 20,
+    paddingTop:        Platform.OS === 'ios' ? 56 : 28,
     paddingHorizontal: 20,
     paddingBottom:     14,
     backgroundColor:   '#0d1117',
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: 1,
     borderBottomColor: '#1e2433',
     flexDirection:     'row',
     justifyContent:    'space-between',
     alignItems:        'center',
   },
-  headerTitle: { fontSize: 18, fontWeight: '700', color: '#e8eaf0', letterSpacing: 0.3 },
-  headerSub:   { fontSize: 12, color: '#8E8E93', marginTop: 3, letterSpacing: 0.2 },
-  burstBadge:  { backgroundColor: '#007AFF', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
-  burstBadgeText: { color: '#FFFFFF', fontWeight: '800', fontSize: 13 },
-  flipBtn: {
-    paddingHorizontal: 12, paddingVertical: 6,
-    backgroundColor: '#1C1C1E', borderRadius: 6,
-    borderWidth: 1, borderColor: '#2C2C2E',
+  screenTitle: {
+    fontFamily: 'BarlowCondensed-Bold',
+    fontSize: 28,
+    letterSpacing: 1.0,
+    color: '#e8eaf0',
+    textTransform: 'uppercase',
   },
-  flipBtnText: { color: '#007AFF', fontSize: 12, fontWeight: '600' },
+  subtitle: {
+    fontFamily: 'DMSans-Regular',
+    fontSize: 13,
+    color: '#6b7280',
+    marginTop: 2,
+  },
+  settingsIcon: {
+    padding: 6,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#1e2433',
+  },
+  modeBadge: {
+    backgroundColor: 'rgba(0, 122, 255, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 122, 255, 0.3)',
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  modeBadgeText: {
+    fontFamily: 'DMSans-Bold',
+    fontSize: 11,
+    color: '#007AFF',
+    textTransform: 'uppercase',
+    letterSpacing: 1.0,
+  },
+  flipBtn: {
+    paddingHorizontal: 10, paddingVertical: 4,
+    backgroundColor: 'transparent',
+    borderWidth: 1, borderColor: '#1e2433',
+    borderRadius: 6,
+  },
+  flipBtnText: { fontFamily: 'DMSans-Bold', color: '#6b7280', fontSize: 11, letterSpacing: 1.0, textTransform: 'uppercase' },
 
   cameraContainer: { flex: 1, width: '100%', overflow: 'hidden', backgroundColor: '#000' },
 
   loadingOverlay: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(28,28,30,0.9)',
+    backgroundColor: 'rgba(10,12,15,0.90)',
     alignItems:      'center',
     justifyContent:  'center',
     gap: 12,
   },
-  loadingText: { color: '#8E8E93', fontSize: 15, fontWeight: '600' },
-  errorText:   { color: '#FF3B30', fontSize: 14, textAlign: 'center', padding: 24 },
+  loadingText: { fontFamily: 'DMSans-SemiBold', color: '#e8eaf0', fontSize: 16 },
+  errorText:   { fontFamily: 'DMSans-Bold', color: '#FF3B30', fontSize: 14, textAlign: 'center', padding: 24 },
 
   progressContainer: {
-    position: 'absolute', top: 0, left: 0, right: 0,
-    height: 3, backgroundColor: 'rgba(0,122,255,0.2)',
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    height: 3, backgroundColor: 'rgba(255,255,255,0.08)',
   },
-  progressFill: { height: '100%', backgroundColor: '#007AFF', borderRadius: 2 },
+  progressFill: { height: '100%', backgroundColor: '#34C759' },
 
   statusBanner: {
     position: 'absolute', top: 20, alignSelf: 'center',
@@ -605,65 +684,76 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 10,
     elevation: 8,
+    maxWidth: '90%',
   },
-  statusBannerText: { color: '#FFFFFF', fontSize: 14, textAlign: 'center', fontWeight: '600', letterSpacing: 0.3 },
+  statusBannerText: { fontFamily: 'DMSans-SemiBold', color: '#FFFFFF', fontSize: 14, textAlign: 'center', letterSpacing: 0.3, flexShrink: 1 },
   livenessRetryBtn: {
     backgroundColor: '#007AFF',
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderRadius: 16,
   },
   livenessRetryText: {
+    fontFamily: 'DMSans-Bold',
     color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '700',
+    fontSize: 16,
   },
 
   controls: { 
     alignItems: 'center', 
     paddingVertical: 20, 
-    backgroundColor: '#000000' 
+    backgroundColor: '#0a0c0f' 
   },
   captureBtn: {
     width: 72, height: 72, borderRadius: 36,
     borderWidth: 3.5, borderColor: '#007AFF',
     alignItems: 'center', justifyContent: 'center',
   },
-  captureBtnDisabled: { borderColor: '#2C2C2E', opacity: 0.5 },
+  captureBtnDisabled: { borderColor: '#1e2433', opacity: 0.5 },
   captureInner: { width: 54, height: 54, borderRadius: 27, backgroundColor: '#007AFF' },
-  captureHint:  { color: '#8E8E93', fontSize: 11, marginTop: 10, letterSpacing: 1.5, fontWeight: '700' },
 
-  nameSheet: {
-    marginHorizontal: 16,
-    marginBottom: 16,
-    padding: 24,
-    backgroundColor: '#1C1C1E',
-    borderRadius: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.5,
-    shadowRadius: 20,
-    elevation: 12,
+  modalContainer: {
+    position: 'absolute',
+    bottom: 0, left: 0, right: 0,
+    backgroundColor: '#111419',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    borderTopWidth: 1,
+    borderTopColor: '#1e2433',
+    paddingHorizontal: 24,
+    paddingTop: 20,
+    paddingBottom: 40 + (Platform.OS === 'ios' ? 20 : 0),
   },
-  nameSheetTitle: { color: '#FFFFFF', fontSize: 18, fontWeight: '700', marginBottom: 6 },
-  nameSheetSub:   { color: '#8E8E93', fontSize: 13, marginBottom: 16 },
-  nameInput: {
-    backgroundColor: '#1C1C1E',
-    borderRadius: 12,
+  modalTitle: {
+    fontFamily: 'BarlowCondensed-Bold',
+    fontSize: 22,
+    color: '#e8eaf0',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  modalSub: { fontFamily: 'DMSans-Regular', color: '#6b7280', fontSize: 14, marginBottom: 16 },
+  textInput: {
+    backgroundColor: '#161b22',
+    borderWidth: 1,
+    borderColor: '#2d3748',
+    borderRadius: 10,
     paddingHorizontal: 16, paddingVertical: 14,
-    color: '#FFFFFF', fontSize: 17, marginBottom: 16,
+    fontFamily: 'DMSans-Regular',
+    color: '#e8eaf0', fontSize: 16, marginBottom: 16,
   },
-  nameActions:    { flexDirection: 'row', gap: 12 },
+  nameActions: { flexDirection: 'row', gap: 12 },
   cancelBtn: {
-    flex: 1, paddingVertical: 14, borderRadius: 12,
-    backgroundColor: '#1C1C1E', alignItems: 'center',
+    flex: 1, paddingVertical: 14, borderRadius: 10,
+    backgroundColor: 'transparent', alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: '#1e2433',
   },
-  cancelBtnText:    { color: '#007AFF', fontWeight: '600', fontSize: 16 },
-  saveBtn:          { flex: 2, paddingVertical: 14, borderRadius: 12, backgroundColor: '#34C759', alignItems: 'center' },
-  saveBtnDisabled:  { backgroundColor: '#2C2C2E', opacity: 0.5 },
-  saveBtnText:      { color: '#FFFFFF', fontWeight: '800', fontSize: 16 },
+  cancelBtnText: { fontFamily: 'DMSans-Bold', color: '#6b7280', fontSize: 12, letterSpacing: 1.0, textTransform: 'uppercase' },
+  ctaButton: { flex: 2, paddingVertical: 16, borderRadius: 10, backgroundColor: '#34C759', alignItems: 'center', justifyContent: 'center' },
+  saveBtnDisabled: { backgroundColor: '#1e2433', opacity: 0.5 },
+  ctaText: { fontFamily: 'DMSans-Bold', color: '#000000', fontSize: 16, letterSpacing: 0.3 },
 
-  statusText: { color: '#8E8E93', fontSize: 15, marginBottom: 20, textAlign: 'center', lineHeight: 22 },
-  btn:        { backgroundColor: '#007AFF', paddingHorizontal: 28, paddingVertical: 14, borderRadius: 12 },
-  btnText:    { color: '#FFFFFF', fontWeight: '700', fontSize: 16 },
+  statusText: { fontFamily: 'DMSans-Regular', color: '#6b7280', fontSize: 15, marginBottom: 20, textAlign: 'center' },
+  btn:        { backgroundColor: '#007AFF', paddingHorizontal: 28, paddingVertical: 14, borderRadius: 10 },
+  btnText:    { fontFamily: 'DMSans-Bold', color: '#FFFFFF', fontSize: 16 },
 });

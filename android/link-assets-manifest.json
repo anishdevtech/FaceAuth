@@ -1,0 +1,45 @@
+{
+  "migIndex": 1,
+  "data": [
+    {
+      "path": "assets/fonts/BarlowCondensed_600SemiBold.ttf",
+      "sha1": "3ee10e25a4f8ebbc8c00fa79bf790f5816c519d5"
+    },
+    {
+      "path": "assets/fonts/BarlowCondensed_700Bold.ttf",
+      "sha1": "5cd05c03686a635d32e78e5ddbdb4b18c7fb206a"
+    },
+    {
+      "path": "assets/fonts/BarlowCondensed_800ExtraBold.ttf",
+      "sha1": "1a548eb6ecd559b30cc485c593fbfd617a083cde"
+    },
+    {
+      "path": "assets/fonts/DMSans_400Regular.ttf",
+      "sha1": "63bd1406121a93854dace9b337ce8356633b543e"
+    },
+    {
+      "path": "assets/fonts/DMSans_500Medium.ttf",
+      "sha1": "a4a418243073609e19195c1c40ca931a9836da50"
+    },
+    {
+      "path": "assets/fonts/DMSans_600SemiBold.ttf",
+      "sha1": "368a13135033ec8ed16ce5bd3a2677f25d276500"
+    },
+    {
+      "path": "assets/fonts/DMSans_700Bold.ttf",
+      "sha1": "334d5a3cdce8f6237ee280a648eb97103e1860dc"
+    },
+    {
+      "path": "assets/fonts/DMSans_800ExtraBold.ttf",
+      "sha1": "42e1c2397b20a2a0ca4e737eafa15aa6dbb06aec"
+    },
+    {
+      "path": "assets/fonts/IBMPlexMono_400Regular.ttf",
+      "sha1": "2b7c2393fff41a6e1446fd6351002e1aa1a999e8"
+    },
+    {
+      "path": "assets/fonts/IBMPlexMono_600SemiBold.ttf",
+      "sha1": "f3a7efe0dc14fce44455e570ab6dea33dddc5133"
+    }
+  ]
+}

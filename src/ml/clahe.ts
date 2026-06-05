@@ -98,15 +98,48 @@ export function applyCLAHE(
     }
   }
 
-  // Phase 2: Apply the computed LUTs to each pixel by looking up the nearest tile's mapping.
+  // Phase 2: Apply the computed LUTs to each pixel using Bilinear Interpolation.
+  // This prevents blocking artifacts at the tile boundaries.
+
+  const halfTileW = Math.round(tileW / 2);
+  const halfTileH = Math.round(tileH / 2);
 
   for (let y = 0; y < height; y++) {
-    const ty = Math.min(Math.floor(y / tileH), TILE_GRID - 1);
     const rowBase = y * width * bpp;
 
+    // Determine Y distances for interpolation
+    let ty1 = 0, ty2 = 0;
+    let py = 0; // fractional distance Y
+
+    if (y <= halfTileH) {
+      ty1 = 0; ty2 = 0; py = 0;
+    } else if (y >= height - halfTileH) {
+      ty1 = TILE_GRID - 1; ty2 = TILE_GRID - 1; py = 0;
+    } else {
+      ty1 = Math.floor((y - halfTileH) / tileH);
+      ty2 = ty1 + 1;
+      py = (y - halfTileH - ty1 * tileH) / tileH;
+    }
+
+    // Precalculate (1 - py) and py to save multiplications inside the inner loop
+    const pyInv = 1 - py;
+
     for (let x = 0; x < width; x++) {
-      const tx = Math.min(Math.floor(x / tileW), TILE_GRID - 1);
       const idx = rowBase + x * bpp;
+
+      // Determine X distances for interpolation
+      let tx1 = 0, tx2 = 0;
+      let px = 0; // fractional distance X
+
+      if (x <= halfTileW) {
+        tx1 = 0; tx2 = 0; px = 0;
+      } else if (x >= width - halfTileW) {
+        tx1 = TILE_GRID - 1; tx2 = TILE_GRID - 1; px = 0;
+      } else {
+        tx1 = Math.floor((x - halfTileW) / tileW);
+        tx2 = tx1 + 1;
+        px = (x - halfTileW - tx1 * tileW) / tileW;
+      }
 
       const r = pixels[idx + rOff];
       const g = pixels[idx + gOff];
@@ -115,9 +148,19 @@ export function applyCLAHE(
       // Original luminance
       const origL = (77 * r + 150 * g + 29 * b) >> 8;
 
-      // CLAHE-mapped luminance
-      const lutOffset = (ty * TILE_GRID + tx) * 256;
-      const newL = luts[lutOffset + origL];
+      // CLAHE-mapped luminance via Bilinear Interpolation
+      const lut11 = luts[(ty1 * TILE_GRID + tx1) * 256 + origL];
+      const lut12 = luts[(ty1 * TILE_GRID + tx2) * 256 + origL];
+      const lut21 = luts[(ty2 * TILE_GRID + tx1) * 256 + origL];
+      const lut22 = luts[(ty2 * TILE_GRID + tx2) * 256 + origL];
+
+      const pxInv = 1 - px;
+      const newL = Math.round(
+        lut11 * pxInv * pyInv +
+        lut12 * px    * pyInv +
+        lut21 * pxInv * py +
+        lut22 * px    * py
+      );
 
       // Scale RGB channels by the luminance ratio
       if (origL > 0) {

@@ -3,22 +3,10 @@
 // endpoints when network connectivity is restored. Successfully transmitted events are subsequently purged.
 
 import NetInfo from '@react-native-community/netinfo';
-import { getUnsyncedEvents, markEventsSynced, type AuthEvent } from '../storage/authSync';
+import { getUnsyncedEvents, markEventsSynced } from '../storage/authSync';
+import { uploadToAWS } from './awsSyncService';
 
 let isSyncing = false;
-
-/**
- * Simulates an asynchronous server upload payload transmission.
- * Must be substituted with appropriate API invocation logic for production deployment.
- */
-async function simulateUpload(event: AuthEvent): Promise<boolean> {
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      console.log(`[SyncManager] ✓ Uploaded event ${event.id} (${event.type}: ${event.success ? 'success' : 'fail'})`);
-      resolve(true);
-    }, 200); // simulate 200ms network round-trip
-  });
-}
 
 /**
  * Flushes all pending synchronization events from the local persistence queue.
@@ -39,7 +27,7 @@ export async function flushQueue(): Promise<void> {
 
     const synced: string[] = [];
     for (const event of events) {
-      const ok = await simulateUpload(event);
+      const ok = await uploadToAWS(event);
       if (ok) {
         synced.push(event.id);
       } else {

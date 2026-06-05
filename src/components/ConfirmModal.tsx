@@ -10,13 +10,8 @@ import {
   View,
 } from 'react-native';
 import Reanimated, {
-  FadeIn,
-  FadeOut,
-  SlideInDown,
-  SlideOutDown,
   useAnimatedStyle,
   useSharedValue,
-  withSpring,
 } from 'react-native-reanimated';
 
 interface ConfirmModalProps {
@@ -46,7 +41,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
 
   useEffect(() => {
     if (visible) {
-      iconScale.value = withSpring(1, { damping: 12, stiffness: 200 });
+      iconScale.value = 1;
     } else {
       iconScale.value = 0.5;
     }
@@ -66,8 +61,6 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
     >
       {/* Backdrop */}
       <Reanimated.View
-        entering={FadeIn.duration(200)}
-        exiting={FadeOut.duration(200)}
         style={styles.backdrop}
       >
         <TouchableOpacity
@@ -78,8 +71,6 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
 
         {/* Card */}
         <Reanimated.View
-          entering={SlideInDown.springify().damping(18).stiffness(180)}
-          exiting={SlideOutDown.duration(200)}
           style={styles.card}
         >
           {/* Icon */}
@@ -102,7 +93,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
           <View style={[styles.actions, cancelText ? styles.actionsRow : null]}>
             {cancelText ? (
               <TouchableOpacity
-                style={[styles.btn, styles.cancelBtn]}
+                style={[styles.btn, styles.cancelBtn, { flex: 1 }]}
                 onPress={onCancel}
                 activeOpacity={0.7}
               >
@@ -114,6 +105,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
               style={[
                 styles.btn,
                 styles.confirmBtn,
+                cancelText ? { flex: 1 } : { width: '100%' },
                 confirmDestructive && styles.destructiveBtn,
               ]}
               onPress={onConfirm}
@@ -195,7 +187,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   cancelBtn: {
-    flex: 1,
     backgroundColor: '#2C2C2E',
   },
   cancelBtnText: {
@@ -204,7 +195,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   confirmBtn: {
-    flex: 1,
     backgroundColor: '#007AFF',
   },
   confirmBtnText: {

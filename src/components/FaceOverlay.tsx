@@ -1,9 +1,15 @@
 // Renders an animated bounding box and facial landmark indicators over the camera preview.
-// During liveness checks, it visualizes the BlazeFace keypoints (eyes, nose, mouth)
-// connected by indicator lines to provide feedback on facial tracking.
-// Note: BlazeFace keypoint indices are: 0=right eye, 1=left eye, 2=nose, 3=mouth, 4=right ear, 5=left ear.
-import React, { useEffect, useRef, useMemo } from 'react';
-import { Animated, StyleSheet, Text, View } from 'react-native';
+// Uses strict 60fps react-native-reanimated physics.
+import React, { useEffect, useMemo } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
+import Animated, { 
+  useSharedValue, 
+  useAnimatedStyle, 
+  withSpring, 
+  withTiming, 
+  withRepeat, 
+  withSequence 
+} from 'react-native-reanimated';
 import type { FaceBox } from '../ml/blazeface';
 
 interface Props {
@@ -15,65 +21,9 @@ interface Props {
   imageWidth?: number;
   imageHeight?: number;
   imageOrientation?: string;
-  /** BlazeFace landmark points {x,y} in normalised [0,1] coords. */
-  debugMesh?: {x: number; y: number}[];
-  /** When true the landmark lines are rendered in blue (liveness mode). */
-  livenessMode?: boolean;
+
 }
 
-const STATUS_COLORS = {
-  scanning: '#FFFFFF',
-  matched:  '#34C759',
-  unknown:  '#FF3B30',
-};
-
-// Helper component that draws a straight line between two absolute pixel coordinates.
-// It utilizes a transformed View to render the connecting segment.
-
-interface LineProps {
-  x1: number; y1: number;
-  x2: number; y2: number;
-  color: string;
-  thickness?: number;
-}
-
-function LandmarkLine({ x1, y1, x2, y2, color, thickness = 2 }: LineProps) {
-  const dx     = x2 - x1;
-  const dy     = y2 - y1;
-  const length = Math.sqrt(dx * dx + dy * dy);
-  const angle  = Math.atan2(dy, dx) * (180 / Math.PI);
-  const cx     = (x1 + x2) / 2;
-  const cy     = (y1 + y2) / 2;
-
-  return (
-    <View
-      style={{
-        position:        'absolute',
-        width:           length,
-        height:          thickness,
-        backgroundColor: color,
-        borderRadius:    thickness / 2,
-        opacity:         0.85,
-        left:            cx - length / 2,
-        top:             cy - thickness / 2,
-        transform:       [{ rotate: `${angle}deg` }],
-      }}
-    />
-  );
-}
-
-// Defines the connectivity graph for facial landmarks.
-// Ear points (indices 4 and 5) are excluded to reduce visual noise.
-const CONNECTIONS: [number, number][] = [
-  [0, 1], // right eye → left eye
-  [0, 2], // right eye → nose
-  [1, 2], // left eye  → nose
-  [2, 3], // nose      → mouth
-  [0, 3], // right eye → mouth  (jaw-line feel)
-  [1, 3], // left eye  → mouth
-];
-
-// Renders the main overlay including the bounding box and landmarks.
 export const FaceOverlay: React.FC<Props> = ({
   box,
   label,
@@ -83,31 +33,41 @@ export const FaceOverlay: React.FC<Props> = ({
   imageWidth = 0,
   imageHeight = 0,
   imageOrientation,
-  debugMesh,
-  livenessMode = false,
+
 }) => {
-  const opacity   = useRef(new Animated.Value(0)).current;
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const left      = useRef(new Animated.Value(0)).current;
-  const top       = useRef(new Animated.Value(0)).current;
-  const width     = useRef(new Animated.Value(0)).current;
-  const height    = useRef(new Animated.Value(0)).current;
+  // Shared values for bounding box position & size
+  const left = useSharedValue(0);
+  const top = useSharedValue(0);
+  const width = useSharedValue(0);
+  const height = useSharedValue(0);
+  const boxOpacity = useSharedValue(0);
 
-  // Pulsating opacity when scanning
+  // Status crossfade opacities
+  const whiteOpacity = useSharedValue(1);
+  const greenOpacity = useSharedValue(0);
+  const redOpacity = useSharedValue(0);
+  const scanPulse = useSharedValue(1.0);
+
   useEffect(() => {
-    if (status === 'scanning') {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, { toValue: 0.4, duration: 900, useNativeDriver: false }),
-          Animated.timing(pulseAnim, { toValue: 1,   duration: 900, useNativeDriver: false }),
-        ]),
-      ).start();
-    } else {
-      pulseAnim.setValue(1);
-    }
-  }, [status, pulseAnim]);
+    'worklet';
+    whiteOpacity.value = withTiming(status === 'scanning' ? 1 : 0, { duration: 250 });
+    greenOpacity.value = withTiming(status === 'matched' ? 1 : 0, { duration: 250 });
+    redOpacity.value = withTiming(status === 'unknown' ? 1 : 0, { duration: 250 });
 
-  // Map normalised image coords → screen pixel coords
+    if (status === 'scanning') {
+      scanPulse.value = withRepeat(
+        withSequence(
+          withTiming(0.4, { duration: 450 }),
+          withTiming(1.0, { duration: 450 })
+        ),
+        -1, false
+      );
+    } else {
+      scanPulse.value = withTiming(1.0, { duration: 200 });
+    }
+  }, [status, whiteOpacity, greenOpacity, redOpacity, scanPulse]);
+
+  // Layout calculation
   const layoutInfo = useMemo(() => {
     let displayW = frameWidth;
     let displayH = frameHeight;
@@ -129,160 +89,128 @@ export const FaceOverlay: React.FC<Props> = ({
         displayW = frameWidth;
         displayH = frameWidth / imageAspect;
       }
-
       offsetX = (frameWidth  - displayW) / 2;
       offsetY = (frameHeight - displayH) / 2;
     }
     return { displayW, displayH, offsetX, offsetY };
   }, [frameWidth, frameHeight, imageWidth, imageHeight, imageOrientation]);
 
-  // Animate the bounding box
+  // Spring physics when box changes
   useEffect(() => {
     if (box) {
       const { displayW, displayH, offsetX, offsetY } = layoutInfo;
 
-      const padX  = (box.xmax - box.xmin) * 0.25;
-      const padY  = (box.ymax - box.ymin) * 0.25;
-      const pxmin = Math.max(box.xmin - padX, 0);
-      const pymin = Math.max(box.ymin - padY, 0);
-      const pxmax = Math.min(box.xmax + padX, 1);
-      const pymax = Math.min(box.ymax + padY, 1);
+      // Use strict ellipse ratio centered on the detected face
+      const faceW = (box.xmax - box.xmin) * displayW;
+      const faceH = (box.ymax - box.ymin) * displayH;
+      const centerX = box.xmin * displayW + faceW / 2 + offsetX;
+      const centerY = box.ymin * displayH + faceH / 2 + offsetY;
 
-      const x = pxmin * displayW + offsetX;
-      const y = pymin * displayH + offsetY;
-      const w = (pxmax - pxmin) * displayW;
-      const h = (pymax - pymin) * displayH;
+      const newW = faceW * 1.4;
+      const newH = newW * 1.35; // Taller than wide -> Ellipse
+      const newX = centerX - newW / 2;
+      const newY = centerY - newH / 2;
 
-      Animated.parallel([
-        Animated.timing(opacity, { toValue: 1, duration: 150, useNativeDriver: false }),
-        Animated.spring(left,   { toValue: x, useNativeDriver: false, damping: 20 }),
-        Animated.spring(top,    { toValue: y, useNativeDriver: false, damping: 20 }),
-        Animated.spring(width,  { toValue: w, useNativeDriver: false, damping: 20 }),
-        Animated.spring(height, { toValue: h, useNativeDriver: false, damping: 20 }),
-      ]).start();
+      boxOpacity.value = withTiming(1, { duration: 50 });
+      left.value = withSpring(newX, { damping: 20, stiffness: 350 });
+      top.value = withSpring(newY, { damping: 20, stiffness: 350 });
+      width.value = withSpring(newW, { damping: 20, stiffness: 350 });
+      height.value = withSpring(newH, { damping: 20, stiffness: 350 });
     } else {
-      Animated.timing(opacity, { toValue: 0, duration: 200, useNativeDriver: false }).start();
+      boxOpacity.value = withTiming(0, { duration: 200 });
     }
-  }, [box, layoutInfo, opacity, left, top, width, height]);
+  }, [box, layoutInfo, left, top, width, height, boxOpacity]);
 
-  const borderColor   = STATUS_COLORS[status];
-  const lineColor     = livenessMode ? '#007AFF' : 'rgba(255,255,255,0.6)';
+  // Animated Styles
+  const containerStyle = useAnimatedStyle(() => ({
+    opacity: boxOpacity.value,
+    transform: [
+      { translateX: left.value },
+      { translateY: top.value }
+    ],
+    width: width.value,
+    height: height.value,
+  }));
 
-  // Convert normalised landmark coords to absolute screen pixels
-  const screenPts = useMemo(() => {
-    if (!debugMesh || debugMesh.length === 0) return [];
-    return debugMesh.map(pt => ({
-      x: pt.x * layoutInfo.displayW + layoutInfo.offsetX,
-      y: pt.y * layoutInfo.displayH + layoutInfo.offsetY,
-    }));
-  }, [debugMesh, layoutInfo]);
+  const whiteOvalStyle = useAnimatedStyle(() => ({
+    opacity: whiteOpacity.value * scanPulse.value,
+    borderColor: '#FFFFFF',
+  }));
+
+  const greenOvalStyle = useAnimatedStyle(() => ({
+    opacity: greenOpacity.value,
+    borderColor: '#34C759',
+  }));
+
+  const redOvalStyle = useAnimatedStyle(() => ({
+    opacity: redOpacity.value,
+    borderColor: '#FF3B30',
+  }));
+
+  // Floating label badge style
+  const labelOpacity = useAnimatedStyle(() => ({
+    opacity: withTiming(label ? 1 : 0, { duration: 120 }),
+  }));
+
+  const labelBgStyleWhite = useAnimatedStyle(() => ({ opacity: whiteOpacity.value, backgroundColor: '#FFFFFF' }));
+  const labelBgStyleGreen = useAnimatedStyle(() => ({ opacity: greenOpacity.value, backgroundColor: '#34C759' }));
+  const labelBgStyleRed   = useAnimatedStyle(() => ({ opacity: redOpacity.value, backgroundColor: '#FF3B30' }));
 
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
-      {/* Bounding box corner accents */}
-      <Animated.View
-        style={[
-          styles.box,
-          { opacity: Animated.multiply(opacity, pulseAnim), left, top, width, height },
-        ]}
-      >
-        <View style={[styles.corner, styles.tl, { borderColor }]} />
-        <View style={[styles.corner, styles.tr, { borderColor }]} />
-        <View style={[styles.corner, styles.bl, { borderColor }]} />
-        <View style={[styles.corner, styles.br, { borderColor }]} />
+      <Animated.View style={[styles.boxContainer, containerStyle]}>
+        
+        {/* Three stacked absolute ovals for crossfading */}
+        <Animated.View style={[styles.oval, whiteOvalStyle]} />
+        <Animated.View style={[styles.oval, greenOvalStyle]} />
+        <Animated.View style={[styles.oval, redOvalStyle]} />
 
-        {/* Label badge */}
-        {label ? (
-          <View style={[styles.labelContainer, { backgroundColor: borderColor }]}>
-            <Text style={styles.labelText} numberOfLines={1}>{label}</Text>
-          </View>
-        ) : null}
+        {/* Floating Label Badge */}
+        <Animated.View style={[styles.labelWrapper, labelOpacity]}>
+          <Animated.View style={[styles.labelBg, labelBgStyleWhite]} />
+          <Animated.View style={[styles.labelBg, labelBgStyleGreen]} />
+          <Animated.View style={[styles.labelBg, labelBgStyleRed]} />
+          <Text style={styles.labelText} numberOfLines={1}>{label || ''}</Text>
+        </Animated.View>
+
       </Animated.View>
-
-      {/* Facial landmark lines (liveness mode) */}
-      {screenPts.length >= 4 && CONNECTIONS.map(([a, b], i) => {
-        const ptA = screenPts[a];
-        const ptB = screenPts[b];
-        if (!ptA || !ptB) return null;
-        return (
-          <LandmarkLine
-            key={i}
-            x1={ptA.x} y1={ptA.y}
-            x2={ptB.x} y2={ptB.y}
-            color={lineColor}
-            thickness={livenessMode ? 2.5 : 1.5}
-          />
-        );
-      })}
-
-      {/* Landmark keypoint dots */}
-      {screenPts.length >= 4 && screenPts.slice(0, 4).map((pt, i) => (
-        <View
-          key={`pt-${i}`}
-          style={[
-            styles.keypoint,
-            livenessMode ? styles.keypointLiveness : styles.keypointNormal,
-            { left: pt.x - (livenessMode ? 5 : 3), top: pt.y - (livenessMode ? 5 : 3) },
-          ]}
-        />
-      ))}
     </View>
   );
 };
 
-// All the visual styles live here.
-
-const CORNER = 36;
-const BORDER = 4;
-const RADIUS = 20;
-
 const styles = StyleSheet.create({
-  box: {
+  boxContainer: {
     position: 'absolute',
+    alignItems: 'center',
+    top: 0,
+    left: 0,
   },
-  corner: {
+  oval: {
+    ...StyleSheet.absoluteFill,
+    borderWidth: 2.5,
+    borderStyle: 'dashed',
+    borderRadius: 999,
+  },
+  labelWrapper: {
     position: 'absolute',
-    width:    CORNER,
-    height:   CORNER,
-    borderWidth: BORDER,
-  },
-  tl: { top: -BORDER, left: -BORDER,     borderRightWidth: 0,  borderBottomWidth: 0, borderTopLeftRadius: RADIUS },
-  tr: { top: -BORDER, right: -BORDER,    borderLeftWidth: 0,   borderBottomWidth: 0, borderTopRightRadius: RADIUS },
-  bl: { bottom: -BORDER, left: -BORDER,  borderRightWidth: 0,  borderTopWidth: 0,    borderBottomLeftRadius: RADIUS },
-  br: { bottom: -BORDER, right: -BORDER, borderLeftWidth: 0,   borderTopWidth: 0,    borderBottomRightRadius: RADIUS },
-  labelContainer: {
-    position:            'absolute',
-    top:                 -28,
-    left:                -1.5,
-    paddingHorizontal:   10,
-    paddingVertical:     4,
-    borderTopLeftRadius: 4,
-    borderTopRightRadius: 4,
+    top: -28,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     minWidth: 80,
+    overflow: 'hidden',
+  },
+  labelBg: {
+    ...StyleSheet.absoluteFill,
   },
   labelText: {
-    color:       '#000',
-    fontSize:    12,
-    fontWeight:  '700',
-    letterSpacing: 0.5,
-  },
-  keypoint: {
-    position:    'absolute',
-    borderRadius: 99,
-  },
-  keypointNormal: {
-    width:           6,
-    height:          6,
-    backgroundColor: 'rgba(255,255,255,0.7)',
-  },
-  keypointLiveness: {
-    width:           10,
-    height:          10,
-    backgroundColor: '#007AFF',
-    shadowColor:     '#007AFF',
-    shadowOffset:    { width: 0, height: 0 },
-    shadowOpacity:   0.9,
-    shadowRadius:    6,
-    elevation:       4,
+    fontFamily: 'DMSans-ExtraBold',
+    fontSize: 13,
+    color: '#000000',
+    letterSpacing: 0.2,
+    zIndex: 1,
   },
 });

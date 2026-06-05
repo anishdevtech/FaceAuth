@@ -1,7 +1,7 @@
 // Implements the active liveness verification system.
 // Generates a randomized sequence of head-movement tasks and evaluates
 // facial landmarks against distance thresholds to verify physical presence.
-import { clamp } from '../utils/mathUtils';
+
 
 export type LivenessTask = 'turn_left' | 'turn_right';
 
