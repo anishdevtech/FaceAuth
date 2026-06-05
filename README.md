@@ -4,7 +4,6 @@
 [![React Native](https://img.shields.io/badge/React_Native-0.85-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)](https://reactnative.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
-[![NHAI Hackathon](https://img.shields.io/badge/NHAI-Hackathon_7.0-🏆_Winning_Entry-orange?style=for-the-badge)](#)
 
 *Imagine a highway construction site in the middle of nowhere. The sun is glaring. There's zero internet connectivity. The government-issued Android device has barely 3GB of RAM. Yet, attendance needs to be logged securely, instantly, and without the possibility of spoofing.*
 
@@ -18,9 +17,9 @@ FaceAuth isn't just another API wrapper. It is a **fully offline, deeply optimiz
 
 Words are great, but seeing a sub-200ms offline face recognition engine running on a mobile device is better. 
 
-👉 **[Watch the FaceAuth Demo Video Here](YOUR_DEMO_VIDEO_LINK_HERE)** 👈
+👉 **[Watch the FaceAuth Demo Video Here](https://youtube.com/shorts/DPhgQwN3aik?feature=share)** 👈
 
-*(Note: Replace with your actual video link before submission!)*
+
 
 ---
 
@@ -72,7 +71,7 @@ FaceAuth pushes React Native to its absolute limits by moving all heavy lifting 
 **Want your mind blown by the technical details?**
 Read our deep dive: [TECHNICAL_DOCUMENTATION.md](./docs/TECHNICAL_DOCUMENTATION.md).
 
-For the official executive pitch, review our [Project Proposal (Markdown)](https://github.com/anishdevtech/FaceAuth/blob/main/docs/PROPOSAL.md) or download the [Project Proposal (PDF)](https://github.com/anishdevtech/FaceAuth/blob/main/docs/PROPOSAL.pdf).
+For the official executive pitch, review our [Project Proposal (Markdown)](https://github.com/anishdevtech/FaceAuth/blob/main/docs/PROPOSAL.md)
 
 ---
 
