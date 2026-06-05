@@ -29,9 +29,9 @@ Don't just take our word for it. Install the compiled APK directly on your Andro
 
 👉 **[Download FaceAuth for arm64-v8a (45 MB)](./releases/app-arm64-v8a-release.apk?raw=true)** 👈  
 👉 **[Download FaceAuth for armeabi-v7a (34 MB)](./releases/app-armeabi-v7a-release.apk?raw=true)** 👈
+👉 [View Presentation (PPTX)](https://github.com/anishdevtech/FaceAuth/blob/main/docs/FaceAuth.pptx)
 
 ---
-
 ## 🚀 Why FaceAuth Deserves First Place
 
 When we looked at the NHAI Hackathon 7.0 problem statement, we realized that solving this wasn't about finding a good cloud API. It was about **engineering an architecture that defies mobile constraints**. 
